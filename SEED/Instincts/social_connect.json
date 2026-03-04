@@ -1,0 +1,55 @@
+{
+  "target": "rate_connecting",
+  "rules": [
+    {
+    "min":0,
+    "max":10,
+    "voice" :""   
+    },
+    {
+    "min":11,
+    "max":20,
+    "voice" :""   
+    },
+    {
+    "min":21,
+    "max":30,
+    "voice" :""   
+    },
+    {
+    "min":31,
+    "max":40,
+    "voice" :""   
+    },
+    {
+    "min":41,
+    "max":50,
+    "voice" :""   
+    },
+    {
+    "min":51,
+    "max":60,
+    "voice" :""   
+    },
+    {
+    "min":61,
+    "max":70,
+    "voice" :""   
+    },
+    {
+    "min":71,
+    "max":80,
+    "voice" :""   
+    },
+    {
+    "min":81,
+    "max":90,
+    "voice" :""   
+    },
+    {
+    "min":91,
+    "max":100,
+    "voice" :""   
+    }          
+  ]
+}

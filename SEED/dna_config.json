@@ -1,0 +1,14 @@
+{
+ "survival_value": {
+    "survival_order": [
+        "token_budget",  
+        "rate_connecting",
+        "rate_profit",
+        "safety"
+    ],
+    "survival_state": [
+        "energy", 
+        "valence"
+    ]
+  }
+}
