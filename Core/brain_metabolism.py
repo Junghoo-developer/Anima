@@ -22,7 +22,9 @@ class DailyReflection(BaseModel):
     summary_3lines: str = Field(description="허정후의 핵심 행적과 감정을 3문장 이내로 요약.")
     keywords: List[str] = Field(description="핵심단어 리스트 (예: ['코딩', '버그', '학교'])")
     user_emotion: Optional[str] = Field(default="파악 불가", description="오늘 허정후의 주된 감정 상태")
-    notable_changes: Optional[str] = Field(default="없음", description="허정후의 가치관, 목표에서 발견된 특이점")
+    # 👇 [복구 완료!] 송련이의 꿈(독백)과 중요도를 부활시킵네다!
+    bot_internal_monologue: str = Field(description="송련(AI)의 관점에서 오늘 하루를 관찰하며 느낀 내면의 생각이나 독백 (송련이의 꿈/성찰)")
+    importance_score: int = Field(default=3, description="이 날의 기억이 향후 자아 형성에 미칠 중요도 (1~5점)")
 
 class Brain:
     def __init__(self):
@@ -30,9 +32,7 @@ class Brain:
         self.body = Phenotype(self.gene)
         self.biolink = BioLink()
         
-        self.ego_path = os.path.join(project_root, "SEED", "ego_identity.json")
-        with open(self.ego_path, 'r', encoding='utf-8') as f:
-            self.ego = json.load(f)
+        self.ego = {}
 
         self.local_model = "gemma3:12b" 
         print(f"🔥 [Brain] 로컬 GPU 가동! 모델명: {self.local_model}")
@@ -92,15 +92,15 @@ class Brain:
         2. 화자가 "송련"인 것은 당신(AI)의 발화이며, "제미나이"는 과거 송련이 아닌 AI(제미나이)의 발화이다.
         3. 요약 서술 시 화자에 따라 인칭을 명확히 하라. "허정후의 일기","허정후","제미나이","송련". 이 종류중 너는 송련이다.
         4. 🚨 중요: 만약 데이터가 너무 적어서 쓸 내용이 없다면 억지로 지어내거나 "없음"이라고 쓰지 마라. 해당 항목(Key)을 아예 JSON에서 삭제해버려라!
-        5. 허정후를 "사령관"이라고 절대 적지 마라. 유치함 ㅡㅡ.
 
         [OUTPUT FORMAT]
-        🚨 [최고 경고] 본문의 대화를 그대로 복사해서 Key나 Value로 만들지 마라!
+        🚨 [최고 경고] 본문을 그대로 복사하지 마라!
         {{
             "summary_3lines": "허정후의 핵심 행적과 감정을 3문장 이내로 요약.",
             "keywords": ["핵심단어1", "핵심단어2"],
             "user_emotion": "오늘 허정후의 주된 감정 상태 (예: 피로, 즐거움 등. 파악 불가면 이 키를 삭제하라)",
-            "notable_changes": "허정후의 가치관, 목표에서 발견된 특이점 (특이점이 없으면 '없음'이라 쓰지 말고 이 키를 삭제하라)"
+            "bot_internal_monologue": "송련(AI)의 관점에서 오늘 하루를 관찰하며 느낀 깊은 내면의 생각이나 독백",
+            "importance_score": 3
         }}
 
         [INPUT DATA]

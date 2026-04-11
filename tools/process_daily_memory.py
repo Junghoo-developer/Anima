@@ -4,6 +4,7 @@ import os
 import ollama # 🔥 구글 API 숙청! 로컬 엔진 투입!
 from datetime import datetime
 from dotenv import load_dotenv
+from neo4j import GraphDatabase # 👈 [신규 추가] Neo4j 접속 라이브러리
 
 load_dotenv()
 # 구글 API 키는 이제 필요 없으니 주석 처리 또는 삭제
@@ -18,6 +19,11 @@ DB_CONFIG = {
     'db': os.getenv("DB_NAME", 'songryeon_db'),
     'charset': 'utf8mb4'
 }
+
+NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
+neo4j_driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 
 # 1. [재료 수집] (기존과 동일하여 생략 없이 유지)
 def get_daily_context(target_date):
@@ -83,19 +89,21 @@ def save_memory_to_db(target_date, analysis_data):
         if cursor.rowcount > 0:
             print(f"♻️ [System] {target_date}의 기존 기록을 덮어씁니다.")
 
-        # 🔥 자력갱생 로컬 임베딩 (nomic-embed-text)
-        text_to_embed = analysis_data.get('diary_content', '') + " " + analysis_data.get('summary_3lines', '')
+        # 👇 [수술 부위 1] 임베딩할 때 '요약'뿐만 아니라 송련이의 '독백'까지 합쳐서 지능을 높입네다!
+        text_to_embed = analysis_data.get('bot_internal_monologue', '') + " " + analysis_data.get('summary_3lines', '')
         
         try:
             emb_res = ollama.embeddings(model='nomic-embed-text', prompt=text_to_embed)
             emb_json = json.dumps(emb_res['embedding'])
         except Exception as e:
             print(f"⚠️ 임베딩 실패 (안전모드 가동): {e}")
-            emb_json = json.dumps([0.0] * 768) # 에러 시 0으로 채운 벡터 저장
+            emb_json = json.dumps([0.0] * 768) 
         
         keywords = json.dumps(analysis_data.get('keywords', []), ensure_ascii=False)
-        emotions = json.dumps(analysis_data.get('user_emotion', {}), ensure_ascii=False)
-        monologue = analysis_data.get('diary_content', '') 
+        emotions = json.dumps(analysis_data.get('user_emotion', '파악 불가'), ensure_ascii=False)
+        
+        # 👇 [수술 부위 2] 엉뚱한 diary_content 대신 진짜 독백과 중요도를 챙깁네다!
+        monologue = analysis_data.get('bot_internal_monologue', '독백 없음') 
         score = analysis_data.get('importance_score', 3)
 
         sql = """
@@ -113,32 +121,83 @@ def save_memory_to_db(target_date, analysis_data):
 
 
 def log_message_to_db(role, content):
-    """ 송련과의 대화를 DB에 저장 (로컬 임베딩 적용) """
-    conn = pymysql.connect(**DB_CONFIG)
-    conn.autocommit(True)
-    cursor = conn.cursor()
+    """ [V6.0] MySQL(백업 결사옹위) + Neo4j(실시간 뇌) 동시 저장 (Dual-Write) """
+    if not content or not content.strip():
+        return
 
+    current_time = datetime.now() 
+    date_str = current_time.strftime('%Y-%m-%d %H:%M:%S')
+    node_id = f"schat_{int(current_time.timestamp())}"
+
+    # 1. 🔥 자력갱생 실시간 공통 로컬 임베딩
     try:
-        current_time = datetime.now() 
-
-        # 🔥 자력갱생 로컬 임베딩
-        if content.strip():
-            try:
-                emb_res = ollama.embeddings(model='nomic-embed-text', prompt=content)
-                emb_json = json.dumps(emb_res['embedding'])
-            except Exception as e:
-                emb_json = json.dumps([0.0] * 768)
-        else:
-            emb_json = None
-
-        sql = """
-            INSERT INTO songryeon_chats (role, content, embedding, created_at)
-            VALUES (%s, %s, %s, %s)
-        """
-        cursor.execute(sql, (role, content, emb_json, current_time))
-        print(f"💾 [기억 보존] {current_time.strftime('%H:%M:%S')} | {role}: {content[:20]}...")
-
+        emb_res = ollama.embeddings(model='nomic-embed-text', prompt=content)
+        embedding_vector = emb_res['embedding']
+        emb_json = json.dumps(embedding_vector)
     except Exception as e:
-        print(f"💥 대화 저장 실패: {e}")
+        print(f"⚠️ 임베딩 실패 (안전모드): {e}")
+        embedding_vector = [0.0] * 768
+        emb_json = json.dumps(embedding_vector)
+
+    # =========================================================
+    # 🛡️ [1차 방어선] MySQL 데이터 결사옹위 (Raw 백업)
+    # =========================================================
+    conn = None
+    try:
+        conn = pymysql.connect(**DB_CONFIG)
+        conn.autocommit(True)
+        with conn.cursor() as cursor:
+            sql = """
+                INSERT INTO songryeon_chats (role, content, embedding, created_at)
+                VALUES (%s, %s, %s, %s)
+            """
+            cursor.execute(sql, (role, content, emb_json, current_time))
+        print(f"💾 [MySQL 백업] {date_str} | {role}: {content[:15]}...")
+    except Exception as e:
+        print(f"💥 MySQL 백업 실패: {e}")
     finally:
-        conn.close()
+        if conn:
+            conn.close() # 💡 안전하게 닫아줍니다!
+
+    # =========================================================
+    # 🧠 [2차 전선] Neo4j 신경망 각인 및 연대기(NEXT) 용접!
+    # =========================================================
+    print("💾 [System] 현장 요원의 대화를 Neo4j 신경망에 각인합니다...")
+    cypher = """
+    // [1단계] 새로운 발화 노드 생성
+    CREATE (n:PastRecord:SongryeonChat {
+        id: $node_id,
+        role: $role,
+        content: $content,
+        date: $date_str,
+        created_at: timestamp()
+    })
+    SET n.embedding = $embedding_vector
+    
+    WITH n
+    // [2단계] 현재 DB에 존재하는 가장 마지막(최신) PastRecord를 찾습니다.
+    OPTIONAL MATCH (prev:PastRecord)
+    WHERE prev.id <> n.id AND prev.date <= n.date
+    WITH n, prev ORDER BY prev.date DESC LIMIT 1
+    
+    // [3단계] 찾은 꼬리가 있다면, 새로운 노드와 NEXT 탯줄로 자동 용접!
+    FOREACH (x IN CASE WHEN prev IS NOT NULL THEN [1] ELSE [] END |
+        MERGE (prev)-[:NEXT]->(n)
+    )
+    
+    // [4단계] 발화자(허정후 vs 송련)를 명확히 연결합니다.
+    WITH n
+    OPTIONAL MATCH (p:Person {name: '허정후'}) WHERE n.role = 'user'
+    OPTIONAL MATCH (a:CoreEgo {name: '송련'}) WHERE n.role <> 'user'
+    FOREACH (x IN CASE WHEN p IS NOT NULL THEN [1] ELSE [] END | MERGE (p)-[:SPOKE]->(n))
+    FOREACH (x IN CASE WHEN a IS NOT NULL THEN [1] ELSE [] END | MERGE (a)-[:SPOKE]->(n))
+    """
+    
+    try:
+        with neo4j_driver.session() as session:
+            session.run(cypher, node_id=node_id, role=role, content=content, 
+                        date_str=date_str, embedding_vector=embedding_vector)
+            
+        print(f"🔗 [신경망 직결] {role}: NEXT 탯줄 자동 연결 성공!")
+    except Exception as e:
+        print(f"💥 Neo4j 저장 실패: {e}")

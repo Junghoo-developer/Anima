@@ -1,6 +1,21 @@
 import json
 import os
 import sys
+import pymysql
+from dotenv import load_dotenv
+
+# [환경 변수 로드]
+load_dotenv()
+
+# 🛡️ 안전 자산(MySQL) 연결 설정
+DB_CONFIG = {
+    'host': os.getenv("DB_HOST", 'localhost'),
+    'port': int(os.getenv("DB_PORT", 3306)),
+    'user': os.getenv("DB_USER", 'root'),
+    'password': os.getenv("DB_PASS"),
+    'db': os.getenv("DB_NAME", 'songryeon_db'),
+    'charset': 'utf8mb4'
+}
 
 # [경로 설정]
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -64,38 +79,43 @@ class BioLink:
 
     def log_history(self, event_type, content, state_snapshot):
         """
-        [역사 기록 복원!] history_stream.json 파일에 회고 기록을 무손실로 저장한다.
+        🔥 [역사 기록 대개조!] 텍스트 파일(좀비)을 영원히 폐기하고, MySQL 안전 자산에 각인합네다!
         """
         import datetime
-        
-        history_path = os.path.join(project_root, "SEED", "history_stream.json")
-        
-        # 1. 새 기록 패키징
-        new_entry = {
-            "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "event": event_type,
-            "content": content,
-            "body_state": state_snapshot
-        }
-        
-        # 2. 기존 역사책 불러오기 (없으면 빈 리스트로 시작)
-        history_data = []
-        if os.path.exists(history_path):
-            try:
-                with open(history_path, 'r', encoding='utf-8') as f:
-                    history_data = json.load(f)
-            except json.JSONDecodeError:
-                history_data = []
-                
-        # 3. 역사책에 새 내용 추가 후 저장
-        history_data.append(new_entry)
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        state_json_str = json.dumps(state_snapshot, ensure_ascii=False)
         
         try:
-            with open(history_path, 'w', encoding='utf-8') as f:
-                json.dump(history_data, f, ensure_ascii=False, indent=2)
-            print(f"📜 [BioLink] 역사 스트림에 기록 완료!")
+            conn = pymysql.connect(**DB_CONFIG)
+            cursor = conn.cursor()
+            
+            # 1. 생체 기록용 전용 테이블 생성 (없을 경우)
+            sql_create = """
+            CREATE TABLE IF NOT EXISTS biolink_logs (
+                log_id INT AUTO_INCREMENT PRIMARY KEY,
+                created_at DATETIME,
+                event_type VARCHAR(50),
+                content TEXT,
+                body_state JSON
+            )
+            """
+            cursor.execute(sql_create)
+            
+            # 2. 생체 기록 INSERT
+            sql_insert = """
+            INSERT INTO biolink_logs (created_at, event_type, content, body_state)
+            VALUES (%s, %s, %s, %s)
+            """
+            cursor.execute(sql_insert, (timestamp, event_type, content, state_json_str))
+            conn.commit()
+            
+            print(f"📜 [BioLink] 생체/이벤트 역사 MySQL 각인 완료! (텍스트 좀비 완전 사살 🔫)")
+            
         except Exception as e:
-            print(f"💥 [BioLink] 역사 기록 저장 실패: {e}")
+            print(f"💥 [BioLink] 생체 역사 DB 저장 실패: {e}")
+        finally:
+            if 'cursor' in locals(): cursor.close()
+            if 'conn' in locals(): conn.close()
             
     # =========================================================
     # 🧬 [본능 추출기] JSON 파일에서 현재 상태에 맞는 Voice를 꺼내옵네다.
