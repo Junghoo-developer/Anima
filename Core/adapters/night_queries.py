@@ -3,6 +3,7 @@
 from collections.abc import Callable
 
 from Core.adapters import neo4j_connection
+from Core.midnight.future.dreamhint_persistence import fetch_active_dreamhints
 
 
 def _rows(result):
@@ -110,7 +111,7 @@ def search_supply_topics(keyword: str = "", *, session_factory: Callable | None 
 
 
 def recent_tactical_briefing(limit: int = 8, *, session_factory: Callable | None = None) -> str:
-    """Return recent TacticalThought rules for advisory context."""
+    """Return active DreamHint advisories for the field loop's auto-input channel."""
     try:
         lim = max(1, min(int(limit), 24))
     except Exception:
@@ -118,28 +119,18 @@ def recent_tactical_briefing(limit: int = 8, *, session_factory: Callable | None
     session_factory = session_factory or neo4j_connection.get_db_session
     try:
         with session_factory() as session:
-            rows = _rows(
-                session.run(
-                    """
-                    MATCH (t:TacticalThought)
-                    RETURN t.situation_trigger AS trig, t.actionable_rule AS rule,
-                           t.priority_weight AS weight, t.batch_id AS batch
-                    ORDER BY t.created_at DESC LIMIT $lim
-                    """,
-                    lim=lim,
-                )
-            )
+            rows = fetch_active_dreamhints(session, limit=lim)
     except Exception as exc:
         return f"[tactical briefing error] {exc}"
 
     if not rows:
-        return "[tactical briefing] No TacticalThought rules recorded yet."
-    lines = ["[recent TacticalThought advisory rules]"]
+        return "[advisory] No active DreamHint records."
+    lines = ["[active DreamHint advisories]"]
     for idx, row in enumerate(rows, 1):
-        trigger = str(row.get("trig") or "").strip()
-        rule = str(row.get("rule") or "").strip()
-        weight = row.get("weight")
-        lines.append(f"{idx}. weight={weight}\n   trigger: {trigger}\n   rule: {rule}")
+        branch = str(row.get("branch_path") or "").strip()
+        persona = str(row.get("source_persona") or "").strip()
+        hint = str(row.get("hint_text") or "").strip()
+        lines.append(f"{idx}. branch={branch} | source_persona={persona}\n   hint: {hint}")
     return "\n".join(lines)
 
 

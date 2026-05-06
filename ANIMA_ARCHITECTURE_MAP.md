@@ -1128,3 +1128,13 @@ Recent thin-controller cleanup:
     time-axis and semantic-axis proposals. New tests cover semantic assembly,
     SemanticBranch/ConceptCluster persistence, TimeBucket bridging, semantic
     recall, shared CoreEgo axis proposals, and `run_night(include_semantic=True)`.
+70. **V4 Phase 0 F트랙 #F1: 현장 자동 advisory 다리 V3 TacticalThought → V4 DreamHint 교체** completed.
+    `Core.adapters.night_queries.recent_tactical_briefing` keeps the legacy
+    function name, signature, and `tactical_briefing` state surface, but its
+    source is now active `DreamHint` advisories via the shared
+    `fetch_active_dreamhints` query boundary. The automatic field-loop advisory
+    channel now reads `hint_text`, `branch_path`, and `source_persona` from
+    non-archived, non-expired DreamHint records instead of the retired
+    `TacticalThought` label. `search_tactics` / `TacticCard` compatibility was
+    left untouched as ordered. New regression tests cover active DreamHint
+    output, empty active advisory output, and archive/expiry filter presence.
