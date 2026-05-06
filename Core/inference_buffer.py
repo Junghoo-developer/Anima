@@ -5,6 +5,8 @@ from datetime import datetime
 from dotenv import load_dotenv
 from neo4j import GraphDatabase # 👈 [신규 투입!] 진짜 뇌(Neo4j)로 향하는 신경망 접속기!
 
+from Core.memory.memory_sanitizer import sanitize_durable_turn_record, sanitize_memory_trace_value
+
 load_dotenv()
 
 # 🛡️ 1. 안전 자산(MySQL) 연결 설정
@@ -44,9 +46,244 @@ class InferenceBuffer:
         """
         if trace_data is None:
             trace_data = {}
+        trace_data = sanitize_memory_trace_value(trace_data, key="trace_data")
 
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Dream slim v1: the new execution path below returns early after
+        # writing lean Dream / TurnProcess / PhaseSnapshot records.
         dream_id_str = datetime.now().strftime("%Y%m%d_%H%M%S") # Neo4j 고유 ID용
+
+        canonical_turn = trace_data.get("canonical_turn", {}) if isinstance(trace_data.get("canonical_turn"), dict) else {}
+        dream_record = trace_data.get("dream_record", {}) if isinstance(trace_data.get("dream_record"), dict) else {}
+        turn_process = trace_data.get("turn_process", {}) if isinstance(trace_data.get("turn_process"), dict) else {}
+        phase_snapshots = trace_data.get("phase_snapshots", []) if isinstance(trace_data.get("phase_snapshots"), list) else []
+
+        if not dream_record and canonical_turn:
+            dream_record = canonical_turn.get("dream_record", {}) if isinstance(canonical_turn.get("dream_record"), dict) else {}
+        if not turn_process and canonical_turn:
+            turn_process = canonical_turn.get("turn_process", {}) if isinstance(canonical_turn.get("turn_process"), dict) else {}
+        if not phase_snapshots and canonical_turn:
+            phase_snapshots = canonical_turn.get("phase_snapshots", []) if isinstance(canonical_turn.get("phase_snapshots"), list) else []
+        dream_record = sanitize_durable_turn_record(dream_record)
+        turn_process = sanitize_durable_turn_record(turn_process)
+        phase_snapshots = sanitize_memory_trace_value(phase_snapshots, key="phase_snapshots") if isinstance(phase_snapshots, list) else []
+
+        process_id = str(turn_process.get("process_id") or f"{dream_id_str}_process").strip()
+        legacy_phase2 = {
+            "raw_read_report": trace_data.get("raw_read_report", {}),
+            "analysis_report": trace_data.get("analysis_report", {}),
+            "used_sources": trace_data.get("used_sources", []),
+        }
+
+        def _safe_snapshot_id(phase_name: str, phase_order: int):
+            safe_name = "".join(ch if ch.isalnum() else "_" for ch in str(phase_name or "").strip()) or "phase"
+            return f"{process_id}_{phase_order}_{safe_name}"[:500]
+
+        cognitive_process_data = {
+            "user_input": user_input,
+            "user_emotion": user_emotion,
+            "biolink_status": biolink_status,
+            "trace_data": trace_data
+        }
+        cognitive_json_str = json.dumps(cognitive_process_data, ensure_ascii=False)
+
+        try:
+            conn = pymysql.connect(**DB_CONFIG)
+            cursor = conn.cursor()
+            sql_create = """
+            CREATE TABLE IF NOT EXISTS agent_dreams (
+                dream_id INT AUTO_INCREMENT PRIMARY KEY,
+                created_at DATETIME,
+                cognitive_process JSON,
+                final_answer TEXT
+            )
+            """
+            cursor.execute(sql_create)
+            sql_insert = """
+            INSERT INTO agent_dreams (created_at, cognitive_process, final_answer)
+            VALUES (%s, %s, %s)
+            """
+            cursor.execute(sql_insert, (timestamp, cognitive_json_str, final_answer))
+            conn.commit()
+            print("💾 [안전 자산] MySQL 금고에 사고 기록이 안전하게 백업되었습네다!")
+        except Exception as e:
+            print(f"💥 MySQL 백업 실패: {e}")
+        finally:
+            if 'cursor' in locals():
+                cursor.close()
+            if 'conn' in locals():
+                conn.close()
+
+        cypher_dream = """
+        MERGE (d:Dream {id: $dream_id})
+        SET d.date = $timestamp,
+            d.schema_version = $schema_version,
+            d.user_input = $user_input,
+            d.final_answer = $final_answer,
+            d.user_emotion = $user_emotion,
+            d.turn_summary = $turn_summary,
+            d.user_dialogue_act = $user_dialogue_act,
+            d.active_task = $active_task,
+            d.active_offer = $active_offer,
+            d.requested_move = $requested_move,
+            d.answer_shape = $answer_shape,
+            d.reply_mode = $reply_mode,
+            d.verdict_action = $verdict_action,
+            d.investigation_status = $investigation_status,
+            d.delivery_status = $delivery_status,
+            d.used_sources = $used_sources,
+            d.process_id = $process_id,
+            d.phase_minus1_intent = $p_minus1_intent,
+            d.phase_0_history = $p0_history,
+            d.phase_1_actions = $p1_history,
+            d.phase_2_summaries = $p2_history,
+            d.phase_3_summary = $p3_summary
+        """
+
+        cypher_process = """
+        MATCH (d:Dream {id: $dream_id})
+        MERGE (tp:TurnProcess {id: $process_id})
+        SET tp.date = $timestamp,
+            tp.schema_version = $schema_version,
+            tp.process_kind = $process_kind,
+            tp.turn_summary = $turn_summary,
+            tp.active_task = $active_task,
+            tp.active_offer = $active_offer,
+            tp.requested_move = $requested_move,
+            tp.answer_shape = $answer_shape,
+            tp.loop_count = toInteger($loop_count),
+            tp.reasoning_budget = toInteger($reasoning_budget),
+            tp.delivery_status = $delivery_status,
+            tp.execution_status = $execution_status,
+            tp.execution_block_reason = $execution_block_reason,
+            tp.operation_kind = $operation_kind,
+            tp.target_scope = $target_scope,
+            tp.executed_tool = $executed_tool,
+            tp.used_sources = $used_sources,
+            tp.field_status_json = $field_status_json,
+            tp.handoff_summary_json = $handoff_summary_json,
+            tp.process_summary_json = $process_summary_json,
+            tp.dream_id = $dream_id
+        MERGE (d)-[:HAS_PROCESS]->(tp)
+        """
+
+        cypher_phase = """
+        MATCH (tp:TurnProcess {id: $process_id})
+        MERGE (ps:PhaseSnapshot {id: $snapshot_id})
+        SET ps.phase_name = $phase_name,
+            ps.phase_order = toInteger($phase_order),
+            ps.status = $status,
+            ps.summary = $summary,
+            ps.summary_json = $summary_json,
+            ps.dream_id = $dream_id,
+            ps.created_at = coalesce(ps.created_at, timestamp())
+        MERGE (tp)-[r:HAS_PHASE]->(ps)
+        SET r.phase_order = toInteger($phase_order)
+        """
+
+        try:
+            with self.neo4j_driver.session() as session:
+                session.run(
+                    cypher_dream,
+                    dream_id=dream_id_str,
+                    timestamp=timestamp,
+                    schema_version=str(dream_record.get("schema_version") or "dream_v3"),
+                    user_input=user_input,
+                    final_answer=final_answer,
+                    user_emotion=user_emotion,
+                    turn_summary=str(dream_record.get("turn_summary") or ""),
+                    user_dialogue_act=str(dream_record.get("user_dialogue_act") or ""),
+                    active_task=str(dream_record.get("active_task") or ""),
+                    active_offer=str(dream_record.get("active_offer") or ""),
+                    requested_move=str(dream_record.get("requested_move") or ""),
+                    answer_shape=str(dream_record.get("answer_shape") or ""),
+                    reply_mode=str(dream_record.get("reply_mode") or ""),
+                    verdict_action=str(dream_record.get("verdict_action") or ""),
+                    investigation_status=str(dream_record.get("investigation_status") or ""),
+                    delivery_status=str(dream_record.get("delivery_status") or ""),
+                    used_sources=list(dream_record.get("used_sources", [])) if isinstance(dream_record.get("used_sources"), list) else [],
+                    process_id=process_id,
+                    p_minus1_intent=json.dumps(
+                        trace_data.get("start_gate_review")
+                        or trace_data.get("response_strategy")
+                        or {"legacy_thought_logs": trace_data.get("thought_logs", [])},
+                        ensure_ascii=False,
+                    ),
+                    p0_history=json.dumps(
+                        {
+                            "messages": trace_data.get("messages", []),
+                            "ops_decision": trace_data.get("ops_decision", {}),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    p1_history=trace_data.get("executed_actions", []),
+                    p2_history=json.dumps(legacy_phase2, ensure_ascii=False),
+                    p3_summary=final_answer,
+                )
+
+                session.run(
+                    cypher_process,
+                    dream_id=dream_id_str,
+                    process_id=process_id,
+                    timestamp=timestamp,
+                    schema_version=str(turn_process.get("schema_version") or "turn_process_v1"),
+                    process_kind=str(turn_process.get("process_kind") or "field_turn_pipeline"),
+                    turn_summary=str(turn_process.get("turn_summary") or ""),
+                    active_task=str(turn_process.get("active_task") or ""),
+                    active_offer=str(turn_process.get("active_offer") or ""),
+                    requested_move=str(turn_process.get("requested_move") or ""),
+                    answer_shape=str(turn_process.get("answer_shape") or ""),
+                    loop_count=int(turn_process.get("loop_count", 0) or 0),
+                    reasoning_budget=int(turn_process.get("reasoning_budget", 0) or 0),
+                    delivery_status=str(turn_process.get("delivery_status") or ""),
+                    execution_status=str(turn_process.get("execution_status") or ""),
+                    execution_block_reason=str(turn_process.get("execution_block_reason") or ""),
+                    operation_kind=str(turn_process.get("operation_kind") or ""),
+                    target_scope=str(turn_process.get("target_scope") or ""),
+                    executed_tool=str(turn_process.get("executed_tool") or ""),
+                    used_sources=list(turn_process.get("used_sources", [])) if isinstance(turn_process.get("used_sources"), list) else [],
+                    field_status_json=json.dumps(turn_process.get("field_status", {}), ensure_ascii=False),
+                    handoff_summary_json=json.dumps(turn_process.get("handoff_summary", {}), ensure_ascii=False),
+                    process_summary_json=json.dumps(turn_process, ensure_ascii=False),
+                )
+
+                for snapshot in phase_snapshots:
+                    if not isinstance(snapshot, dict):
+                        continue
+                    phase_name = str(snapshot.get("phase_name") or "").strip()
+                    phase_order = int(snapshot.get("phase_order", 0) or 0)
+                    session.run(
+                        cypher_phase,
+                        process_id=process_id,
+                        snapshot_id=_safe_snapshot_id(phase_name, phase_order),
+                        phase_name=phase_name,
+                        phase_order=phase_order,
+                        status=str(snapshot.get("status") or ""),
+                        summary=str(snapshot.get("summary") or ""),
+                        summary_json=json.dumps(snapshot.get("payload", {}), ensure_ascii=False),
+                        dream_id=dream_id_str,
+                    )
+
+                session.run(
+                    """
+                    MATCH (u:Person {name: '허정후'})
+                    MATCH (e:CoreEgo {name: '송련'})
+                    MATCH (d:Dream {id: $dream_id})
+                    MATCH (tp:TurnProcess {id: $process_id})
+                    MERGE (u)-[:EXPERIENCED]->(d)
+                    MERGE (e)-[:EXPERIENCED]->(d)
+                    MERGE (u)-[:EXPERIENCED]->(tp)
+                    MERGE (e)-[:EXPERIENCED]->(tp)
+                    """,
+                    dream_id=dream_id_str,
+                    process_id=process_id,
+                )
+
+            print("✨ [진짜 뇌] Dream를 슬림하게 저장하고 TurnProcess/PhaseSnapshot까지 분리 각인했습네다!\n")
+        except Exception as e:
+            print(f"💥 Neo4j Dream 각인 실패: {e}")
+
+        return dream_id_str
 
         # =========================================================
         # 🛡️ 1단계: MySQL (안전 자산 백업 - 기존 로직 유지)
@@ -254,6 +491,27 @@ class InferenceBuffer:
                         sd_id=sd_id,
                         did=did,
                     )
+                    session.run(
+                        """
+                        MATCH (sd:SecondDream {id: $sd_id})
+                        MATCH (d:Dream {id: $did})-[:HAS_PROCESS]->(tp:TurnProcess)
+                        MERGE (sd)-[:AUDITS_PROCESS]->(tp)
+                        """,
+                        sd_id=sd_id,
+                        did=did,
+                    )
+                session.run(
+                    """
+                    MATCH (sd:SecondDream {id: $sd_id})
+                    MATCH (u:Person {name: '허정후'})
+                    MATCH (e:CoreEgo {name: '송련'})
+                    MERGE (sd)-[:TARGETS_ROOT]->(u)
+                    MERGE (sd)-[:TARGETS_ROOT]->(e)
+                    MERGE (u)-[:EXPERIENCED]->(sd)
+                    MERGE (e)-[:EXPERIENCED]->(sd)
+                    """,
+                    sd_id=sd_id,
+                )
             print(f"✨ [2차 꿈] Neo4j SecondDream 각인 완료 (id={sd_id})\n")
         except Exception as e:
             print(f"💥 [2차 꿈] Neo4j 각인 실패: {e}")

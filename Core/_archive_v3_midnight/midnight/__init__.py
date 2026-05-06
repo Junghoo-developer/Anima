@@ -1,0 +1,1 @@
+"""Midnight government department modules."""

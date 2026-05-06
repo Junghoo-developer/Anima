@@ -1,20 +1,329 @@
 import ast
 import builtins
 import json
+import os
 import re
 import sys
 import unicodedata
-from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage, AIMessage
+from dotenv import load_dotenv
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_ollama import ChatOllama
+from .request_intents_v4 import (
+    extract_explicit_search_phrase as _shared_extract_explicit_search_phrase,
+    is_assistant_investigation_request_turn as _shared_is_assistant_investigation_request_turn,
+    is_assistant_question_request_turn as _shared_is_assistant_question_request_turn,
+    is_directive_or_correction_turn as _shared_is_directive_or_correction_turn,
+    is_initiative_request_turn as _shared_is_initiative_request_turn,
+    is_recent_dialogue_review_turn as _shared_is_recent_dialogue_review_turn,
+    topic_reset_confidence as _shared_topic_reset_confidence,
+)
+from .prompt_builders import (
+    build_phase_2b_prompt,
+    build_phase_minus_1a_prompt,
+)
+from .goal_contracts import (
+    UserGoalContract,
+    contract_satisfied_by_facts as _contract_satisfied_by_facts_impl,
+    contract_identity_names_from_facts as _contract_identity_names_from_facts_impl,
+    contract_status_packet as _contract_status_packet_impl,
+    derive_user_goal_contract as _derive_user_goal_contract_impl,
+    extract_canonical_name_candidates_from_identity_claim as _extract_canonical_name_candidates_from_identity_claim_impl,
+    extract_user_name_candidates_from_text as _extract_user_name_candidates_from_text_impl,
+    fact_supports_user_canonical_name_claim as _fact_supports_user_canonical_name_claim_impl,
+    filled_slots_from_contract as _filled_slots_from_contract_impl,
+)
 from .state import AnimaState
+from .evidence_ledger import (
+    append_evidence_event,
+    evidence_ledger_for_contract,
+    evidence_ledger_for_prompt,
+)
+from .readiness import (
+    normalize_readiness_decision,
+    readiness_from_auditor_action,
+    readiness_from_delivery_payload,
+)
 from .tools import available_tools
-from tools import toolbox
-from tools.toolbox import get_db_session
-from pydantic import BaseModel, Field
-from typing import Dict, List, Literal
+from .field_memo import (
+    is_memory_state_disclosure_turn,
+    looks_like_memo_recall_turn,
+)
+from .pipeline.contracts import (
+    AdvocateReport,
+    AnalysisReport,
+    AnchoredReasoningPair,
+    ArbitrationPair,
+    AuditorOutput,
+    CriticObjection,
+    CriticReport,
+    EvidenceItem,
+    FactCell,
+    FieldMemoJudgment,
+    GoalLock,
+    OperationContract,
+    OperationPlan,
+    OpsDecision,
+    OpsNodeCard,
+    OpsToolCard,
+    RawReadItem,
+    RawReadReport,
+    ReasoningBoardV1,
+    ReasoningBoardV2,
+    ReasoningBudgetPlan,
+    ResponseStrategy,
+    SourceJudgment,
+    StartGateAssessment,
+    StartGateTurnContract,
+    StepByStepPlan,
+    StrategistReasoningOutput,
+    StrategistToolRequest,
+    StrategyArbitrationAudit,
+    SubjectiveCell,
+    VerdictBoard,
+)
+from .pipeline.packets import (
+    analysis_packet_for_prompt as _analysis_packet_for_prompt,
+    answer_mode_policy_packet_for_prompt as _answer_mode_policy_packet_for_prompt,
+    build_source_relay_packet as _build_source_relay_packet,
+    judge_speaker_packet_for_prompt as _judge_speaker_packet_for_prompt,
+    normalize_analysis_with_source_relay as _normalize_analysis_with_source_relay,
+    raw_read_report_packet_for_prompt as _raw_read_report_packet_for_prompt,
+    reasoning_board_packet_for_prompt as _reasoning_board_packet_for_prompt,
+    source_relay_packet_for_prompt as _source_relay_packet_for_prompt,
+    strategy_packet_for_prompt as _strategy_packet_for_prompt,
+    strategist_output_packet_for_prompt as _strategist_output_packet_for_prompt,
+    verdict_packet_for_prompt as _verdict_packet_for_prompt,
+    working_memory_packet_for_prompt as _working_memory_packet_for_prompt,
+)
+from .pipeline.plans import (
+    empty_action_plan as _empty_action_plan,
+    empty_advocate_report as _empty_advocate_report,
+    empty_critic_report as _empty_critic_report,
+    empty_goal_lock as _empty_goal_lock,
+    empty_operation_contract as _empty_operation_contract,
+    empty_operation_plan as _empty_operation_plan,
+    empty_verdict_board as _empty_verdict_board,
+    normalize_action_plan as _normalize_action_plan,
+    normalize_convergence_state as _normalize_convergence_state,
+    normalize_delivery_readiness as _normalize_delivery_readiness,
+    normalize_goal_lock as _normalize_goal_lock,
+    normalize_operation_contract as _normalize_operation_contract,
+    normalize_operation_plan as _normalize_operation_plan,
+    normalize_short_string_list as _normalize_short_string_list,
+    normalize_strategist_goal as _normalize_strategist_goal,
+    strategist_answer_mode_target_from_policy as _strategist_answer_mode_target_from_policy,
+    strategist_goal_from_goal_lock as _strategist_goal_from_goal_lock,
+)
+from .pipeline.delivery import run_phase_3_validator as _run_phase_3_validator
+from .pipeline.delivery_contracts import (
+    build_phase3_speaker_judge_contract as _build_phase3_speaker_judge_contract_impl,
+    looks_like_internal_phase3_seed as _looks_like_internal_phase3_seed,
+    verbalize_field_memo_delivery_seed as _verbalize_field_memo_delivery_seed_impl,
+    verbalize_grounded_delivery_seed as _verbalize_grounded_delivery_seed_impl,
+)
+from .pipeline.delivery_failures import (
+    build_clean_failure_packet as _build_clean_failure_packet_impl,
+    clean_failure_missing_items as _clean_failure_missing_items_impl,
+)
+from .pipeline.delivery_gates import (
+    field_memo_answer_ready_for_phase3 as _field_memo_answer_ready_for_phase3_impl,
+    grounded_source_ready_for_phase3 as _grounded_source_ready_for_phase3_impl,
+    guard_phase3_decision_for_grounded_turn as _guard_phase3_decision_for_grounded_turn_impl,
+    phase3_delivery_payload_for_gate as _phase3_delivery_payload_for_gate_impl,
+    phase3_delivery_payload_ready_for_gate as _phase3_delivery_payload_ready_for_gate_impl,
+    recent_dialogue_ready_for_phase3 as _recent_dialogue_ready_for_phase3_impl,
+    turn_requires_grounded_delivery as _turn_requires_grounded_delivery_impl,
+)
+from .pipeline.delivery_packets import build_judge_speaker_packet as _build_judge_speaker_packet
+from .pipeline.delivery_payloads import (
+    build_phase3_delivery_payload as _build_phase3_delivery_payload_impl,
+    build_phase3_lane_delivery_packet as _build_phase3_lane_delivery_packet_impl,
+    phase3_payload_accepted_facts_from_packet as _phase3_payload_accepted_facts_from_packet_impl,
+)
+from .pipeline.delivery_review import (
+    build_speaker_review as _build_speaker_review,
+    has_meaningful_delivery_seed as _has_meaningful_delivery_seed,
+    is_generic_continue_seed as _is_generic_continue_seed,
+    looks_like_generic_non_answer_text as _looks_like_generic_non_answer_text,
+    looks_like_internal_delivery_leak as _looks_like_internal_delivery_leak,
+    looks_like_user_parroting_report as _looks_like_user_parroting_report,
+    normalize_user_facing_text as _normalize_user_facing_text,
+    run_phase3_delivery_review as _run_phase3_delivery_review,
+    sanitize_response_strategy_for_phase3 as _sanitize_response_strategy_for_phase3,
+)
+from .pipeline.delivery_sources import (
+    build_field_memo_user_brief as _build_field_memo_user_brief_impl,
+    build_findings_first_packet as _build_findings_first_packet_impl,
+    build_grounded_source_findings_packet as _build_grounded_source_findings_packet_impl,
+    build_recent_dialogue_brief as _build_recent_dialogue_brief_impl,
+    extract_turns_from_recent_dialogue_report as _extract_turns_from_recent_dialogue_report_impl,
+    field_memo_analysis_brief_for_delivery as _field_memo_analysis_brief_for_delivery_impl,
+    format_findings_first_delivery as _format_findings_first_delivery_impl,
+    parse_search_result_hits as _parse_search_result_hits_impl,
+    recent_dialogue_brief_text as _recent_dialogue_brief_text_impl,
+    split_field_memo_fact_blob as _split_field_memo_fact_blob_impl,
+)
+from .pipeline.answer_modes import (
+    answer_mode_policy_allows_direct_phase3 as _answer_mode_policy_allows_direct_phase3_impl,
+    answer_mode_policy_for_turn as _answer_mode_policy_for_turn_impl,
+    answer_mode_policy_from_state as _answer_mode_policy_from_state_impl,
+    extract_current_turn_grounding_facts as _extract_current_turn_grounding_facts_impl,
+    response_strategy_from_answer_mode_policy as _response_strategy_from_answer_mode_policy_impl,
+    turn_allows_parametric_knowledge_blend as _turn_allows_parametric_knowledge_blend_impl,
+)
+from .pipeline.continuation import (
+    accepted_offer_execution_seed as _accepted_offer_execution_seed_impl,
+    base_followup_context_expected as _base_followup_context_expected_impl,
+    casual_social_user_facing_seed as _casual_social_user_facing_seed_impl,
+    has_substantive_dialogue_anchor as _has_substantive_dialogue_anchor_impl,
+    is_followup_offer_acceptance_turn as _is_followup_offer_acceptance_turn_impl,
+    is_followup_ack_turn as _is_followup_ack_turn_impl,
+    is_retry_previous_answer_turn as _is_retry_previous_answer_turn_impl,
+    is_social_repair_turn as _is_social_repair_turn_impl,
+    is_short_affirmation as _is_short_affirmation_impl,
+    llm_short_term_context_material as _llm_short_term_context_material_impl,
+    offer_acceptance_strategy as _offer_acceptance_strategy_impl,
+    pending_dialogue_act_accepts_current_turn as _pending_dialogue_act_accepts_current_turn_impl,
+    pending_dialogue_act_anchor as _pending_dialogue_act_anchor_impl,
+    previous_delivery_anchor as _previous_delivery_anchor_impl,
+    recent_context_last_assistant_turn as _recent_context_last_assistant_turn_impl,
+    recent_context_invites_continuation as _recent_context_invites_continuation_impl,
+    recent_hint_budget_from_working_memory as _recent_hint_budget_from_working_memory_impl,
+    retry_previous_answer_strategy as _retry_previous_answer_strategy_impl,
+    short_term_context_response_strategy as _short_term_context_response_strategy_impl,
+    short_term_context_strategy_is_usable as _short_term_context_strategy_is_usable_impl,
+    social_repair_strategy as _social_repair_strategy_impl,
+    social_turn_strategy as _social_turn_strategy_impl,
+    temporal_context_allows_carry_over as _temporal_context_allows_carry_over_impl,
+    temporal_context_prefers_current_input as _temporal_context_prefers_current_input_impl,
+    user_turn_targets_assistant_reply as _user_turn_targets_assistant_reply_impl,
+    working_memory_active_offer as _working_memory_active_offer_impl,
+    working_memory_active_task as _working_memory_active_task_impl,
+    working_memory_direct_answer_seed as _working_memory_direct_answer_seed_impl,
+    working_memory_expects_continuation as _working_memory_expects_continuation_impl,
+    working_memory_last_assistant_answer as _working_memory_last_assistant_answer_impl,
+    working_memory_pending_question as _working_memory_pending_question_impl,
+    working_memory_pending_dialogue_act as _working_memory_pending_dialogue_act_impl,
+    working_memory_temporal_context as _working_memory_temporal_context_impl,
+    working_memory_writer_packet as _working_memory_writer_packet_impl,
+)
+from .pipeline.field_memo_review import (
+    enforce_field_memo_judgments as _enforce_field_memo_judgments_impl,
+    field_memo_evidence_kind as _field_memo_evidence_kind_impl,
+    field_memo_evidence_text as _field_memo_evidence_text_impl,
+    field_memo_facts_from_item as _field_memo_facts_from_item_impl,
+    field_memo_judgments_from_source_judgments as _field_memo_judgments_from_source_judgments_impl,
+    field_memo_metadata_text as _field_memo_metadata_text_impl,
+    field_memo_packet_ready_for_delivery as _field_memo_packet_ready_for_delivery_impl,
+    field_memo_review_has_concrete_memos as _field_memo_review_has_concrete_memos_impl,
+    field_memo_text as _field_memo_text_impl,
+    field_memo_tokens as _field_memo_tokens_impl,
+    judge_field_memo_item_for_goal as _judge_field_memo_item_for_goal_impl,
+    rejected_sources_from_field_memo_judgments as _rejected_sources_from_field_memo_judgments_impl,
+)
+from .pipeline.fact_judge import run_phase_2_analyzer as _run_phase_2_analyzer
+from .pipeline.reader import run_phase_2a_reader as _run_phase_2a_reader
+from .pipeline.rescue import run_phase_119_rescue as _run_phase_119_rescue
+from .pipeline.start_gate import run_phase_minus_1s_start_gate as _run_phase_minus_1s_start_gate
+from .pipeline.strategy import (
+    run_base_phase_minus_1a_thinker as _run_base_phase_minus_1a_thinker,
+    run_phase_minus_1a_thinker as _run_phase_minus_1a_thinker,
+)
+from .pipeline.strategy_repairs import (
+    ensure_direct_delivery_response_strategy as _ensure_direct_delivery_response_strategy_impl,
+    ensure_social_turn_strategist_delivery as _ensure_social_turn_strategist_delivery_impl,
+)
+from .pipeline.supervisor import run_phase_0_supervisor as _run_phase_0_supervisor
+from .pipeline.tool_execution import run_phase_1_searcher as _run_phase_1_searcher
+from .pipeline.runtime_context import (
+    empty_tool_carryover_state as _empty_tool_carryover_state_impl,
+    extract_source_ids_from_tool_result as _extract_source_ids_from_tool_result_impl,
+    normalize_execution_trace as _normalize_execution_trace_impl,
+    normalize_tool_carryover_state as _normalize_tool_carryover_state_impl,
+    source_id_looks_scrollable as _source_id_looks_scrollable_impl,
+    source_ids_from_working_memory as _source_ids_from_working_memory_impl,
+    stable_action_signature as _stable_action_signature_impl,
+    tool_carryover_anchor_id as _tool_carryover_anchor_id_impl,
+    tool_carryover_from_state as _tool_carryover_from_state_impl,
+    tool_carryover_from_working_memory as _tool_carryover_from_working_memory_impl,
+    tool_query_from_args as _tool_query_from_args_impl,
+    update_tool_carryover_after_tool as _update_tool_carryover_after_tool_impl,
+)
+from .pipeline.progress import (
+    advance_progress_markers as _advance_progress_markers_impl,
+    analysis_progress_signature as _analysis_progress_signature_impl,
+    analysis_refresh_allowed as _analysis_refresh_allowed_impl,
+    analysis_refresh_signature as _analysis_refresh_signature_impl,
+    apply_progress_contract as _apply_progress_contract_impl,
+    build_strategy_arbitration_audit as _build_strategy_arbitration_audit_impl,
+    decision_from_strategy_arbitration_audit as _decision_from_strategy_arbitration_audit_impl,
+    execution_trace_signature as _execution_trace_signature_impl,
+    mark_analysis_refresh as _mark_analysis_refresh_impl,
+    merge_strategy_audits as _merge_strategy_audits_impl,
+    normalize_progress_markers as _normalize_progress_markers_impl,
+    operation_contract_from_action_plan as _operation_contract_from_action_plan_impl,
+    operation_contract_signature as _operation_contract_signature_impl,
+    raw_progress_signature as _raw_progress_signature_impl,
+    same_tool_call_as_execution as _same_tool_call_as_execution_impl,
+    signature_digest as _signature_digest_impl,
+    strategy_progress_signature as _strategy_progress_signature_impl,
+    with_execution_trace_contract as _with_execution_trace_contract_impl,
+)
+from .pipeline.tool_planning import (
+    compiled_memory_recall_queries as _compiled_memory_recall_queries_impl,
+    decision_from_strategist_tool_contract as _decision_from_strategist_tool_contract_impl,
+    deterministic_strategist_tool_request_from_context as _deterministic_strategist_tool_request_from_context_impl,
+    ensure_tool_request_in_strategist_payload as _ensure_tool_request_in_strategist_payload_impl,
+    recent_context_anchor_query as _recent_context_anchor_query_impl,
+    strategist_tool_request_from_context as _strategist_tool_request_from_context_impl,
+    tool_request_payload_from_instruction as _tool_request_payload_from_instruction_impl,
+    valid_strategist_tool_request as _valid_strategist_tool_request_impl,
+)
+from .warroom.contracts import (
+    WarRoomAgentNote,
+    WarRoomDeliberationOutput,
+    WarRoomDuty,
+    WarRoomEpistemicDebt,
+    WarRoomFreedom,
+    WarRoomStateV1,
+)
+from .warroom.deliberator import run_phase_warroom_deliberator as _run_phase_warroom_deliberator
+from .warroom.output import (
+    _build_warroom_answer_seed_packet as _build_warroom_answer_seed_packet_impl,
+    _fallback_war_room_output as _fallback_war_room_output_impl,
+    _response_strategy_from_war_room_output,
+    _war_room_output_is_usable,
+    _war_room_seed_alignment_issue as _war_room_seed_alignment_issue_impl,
+)
+from .warroom.state import (
+    _derive_war_room_operating_contract,
+    _empty_war_room_operating_contract,
+    _empty_war_room_state,
+    _normalize_war_room_operating_contract,
+    _normalize_war_room_state,
+    _upsert_war_room_agent_note,
+    _war_room_after_advocate,
+    _war_room_after_judge,
+    _war_room_from_critic,
+    _war_room_missing_items_from_analysis,
+    _war_room_packet_for_prompt,
+)
+from Core.adapters.neo4j_connection import get_db_session
+from typing import Any
 
-llm = ChatOllama(model="gemma3:12b", temperature=0.0)
-llm_supervisor = ChatOllama(model="llama3.1", temperature=0.0)
+load_dotenv()
+
+
+def _env_model_name(key: str, default: str) -> str:
+    value = os.getenv(key, "").strip()
+    return value or default
+
+
+ANIMA_MAIN_MODEL = _env_model_name("ANIMA_MAIN_MODEL", "gemma4:e4b")
+ANIMA_SUPERVISOR_MODEL = _env_model_name("ANIMA_SUPERVISOR_MODEL", "llama3.1")
+
+llm = ChatOllama(model=ANIMA_MAIN_MODEL, temperature=0.0)
+llm_supervisor = ChatOllama(model=ANIMA_SUPERVISOR_MODEL, temperature=0.0)
 
 def _log(message: str):
     text = str(message)
@@ -26,245 +335,46 @@ def _log(message: str):
         builtins.print(safe_text)
 
 print = _log
+print(f"[ANIMA Models] main={ANIMA_MAIN_MODEL} | supervisor={ANIMA_SUPERVISOR_MODEL}")
 
-class EvidenceItem(BaseModel):
-    source_id: str = Field(description="Source identifier such as a date, node id, or document address.")
-    source_type: str = Field(description="Source category such as diary, chat, db_schema, or memory.")
-    extracted_fact: str = Field(description="Objective fact only. No speculation or interpretation.")
 
-class SourceJudgment(BaseModel):
-    source_id: str = Field(description="Source identifier judged by phase_2b.")
-    source_type: str = Field(description="Source type judged by phase_2b.")
-    source_status: Literal["pass", "objection", "ambiguous", "insufficient"] = Field(
-        description="Per-source judgment made by the phase_2b critic."
-    )
-    accepted_facts: List[str] = Field(description="Facts from this source that remain usable after criticism.")
-    contested_facts: List[str] = Field(description="Facts from this source that remain disputed or weak.")
-    objection_reason: str = Field(description="Why this source is limited, objected to, or still ambiguous.")
-    missing_info: List[str] = Field(description="What is still missing for this source.")
-    search_needed: bool = Field(description="Whether this source still points to more search work.")
+def _is_clean_failure_action(action: Any) -> bool:
+    return str(action or "").strip() in {"answer_not_ready", "clean_failure"}
 
-class AnalysisReport(BaseModel):
-    evidences: List[EvidenceItem] = Field(description="Evidence items extracted from raw search results.")
-    source_judgments: List[SourceJudgment] = Field(
-        default_factory=list,
-        description="Per-source prosecutor judgments derived from the raw relay packet."
-    )
-    analytical_thought: str = Field(description="Investigator reasoning about links, gaps, contradictions, and next steps.")
-    situational_brief: str = Field(description="Short operational summary for -1b.")
-    investigation_status: Literal["COMPLETED", "INCOMPLETE", "EXPANSION_REQUIRED"] = Field(
-        description="Investigation state: completed, incomplete, or expansion required."
+
+def _ledger_with_event(state: dict, *, source_kind: str, producer_node: str, content: Any, source_ref: str = "", confidence: float = 1.0):
+    return append_evidence_event(
+        state.get("evidence_ledger", {}) if isinstance(state, dict) else {},
+        source_kind=source_kind,
+        producer_node=producer_node,
+        source_ref=source_ref,
+        timestamp=str(state.get("current_time") or "") if isinstance(state, dict) else "",
+        content=content,
+        confidence=confidence,
     )
 
 
-class RawReadItem(BaseModel):
-    source_id: str = Field(description="Source identifier such as a date, node id, or current_turn.")
-    source_type: str = Field(description="Source type such as diary, chat, artifact, memory, or current_turn.")
-    excerpt: str = Field(description="Short literal excerpt from the raw source.")
-    observed_fact: str = Field(description="What was directly observed in the raw source, without interpretation.")
-
-
-class RawReadReport(BaseModel):
-    read_mode: Literal["current_turn_only", "recent_dialogue_review", "full_raw_review", "empty"] = Field(
-        description="Whether phase_2a reviewed only the current turn, a full raw source payload, or nothing."
+def _attach_ledger_event(result: dict, state: dict, *, source_kind: str, producer_node: str, content: Any, source_ref: str = "", confidence: float = 1.0):
+    if not isinstance(result, dict):
+        return result
+    result["evidence_ledger"] = _ledger_with_event(
+        state,
+        source_kind=source_kind,
+        producer_node=producer_node,
+        source_ref=source_ref,
+        content=content,
+        confidence=confidence,
     )
-    reviewed_all_input: bool = Field(description="Whether phase_2a completed a full read of the available raw input.")
-    source_summary: str = Field(description="Short summary of what sources were reviewed.")
-    items: List[RawReadItem] = Field(description="Important raw observations extracted from the reviewed input.")
-    coverage_notes: str = Field(description="Notes about coverage, omissions, and confidence in the read pass.")
+    return result
 
-class ResponseStrategy(BaseModel):
-    reply_mode: Literal["grounded_answer", "continue_previous_offer", "casual_reaction", "cautious_minimal", "ask_user_question_now"] = Field(
-        description="Response mode for the current turn."
-    )
-    answer_goal: str = Field(description="Primary goal of the response.")
-    tone_strategy: str = Field(description="Tone and stance guidance for the response.")
-    evidence_brief: str = Field(description="Compressed factual brief prepared for phase_3.")
-    reasoning_brief: str = Field(description="Short explanation of how facts connect to the user request.")
-    direct_answer_seed: str = Field(description="Grounded answer seed that phase_3 can reuse.")
-    must_include_facts: List[str] = Field(description="Facts that must appear or be respected in the response.")
-    must_avoid_claims: List[str] = Field(description="Claims that must not appear because they are ungrounded or risky.")
-    answer_outline: List[str] = Field(description="Practical outline for the final answer.")
-    uncertainty_policy: str = Field(description="How to speak when evidence is weak or incomplete.")
+def _normalize_reasoning_preferred_path(value: Any) -> str:
+    path = str(value or "").strip()
+    if path == "direct_answer":
+        return "delivery_contract"
+    if path in {"delivery_contract", "internal_reasoning", "tool_first"}:
+        return path
+    return "internal_reasoning"
 
-class FactCell(BaseModel):
-    fact_id: str = Field(description="Stable fact identifier inside the reasoning board.")
-    source_id: str = Field(description="Source address such as a date or node id.")
-    source_type: str = Field(description="Source type such as diary, chat, or schema.")
-    excerpt: str = Field(description="Short literal excerpt from the source.")
-    extracted_fact: str = Field(description="Objective extracted fact.")
-    fact_kind: Literal["event", "quote", "timeline", "preference", "relationship", "explicit_emotion", "other"] = Field(
-        description="Type of fact."
-    )
-    confidence: float = Field(description="Fact confidence score between 0.0 and 1.0.")
-
-class SubjectiveCell(BaseModel):
-    claim_text: str = Field(description="Interpretation, hypothesis, or policy claim produced by -1a.")
-    claim_kind: Literal[
-        "interpretation",
-        "hypothesis",
-        "causal_guess",
-        "intent_inference",
-        "user_model_update",
-        "response_policy",
-    ] = Field(description="Kind of subjective claim.")
-    confidence: float = Field(description="Confidence score between 0.0 and 1.0.")
-    answer_policy: Literal["allowed", "cautious", "forbidden"] = Field(
-        description="Whether phase_3 may use this claim directly."
-    )
-    uncertainty_note: str = Field(default="", description="Short note about uncertainty.")
-
-class AnchoredReasoningPair(BaseModel):
-    pair_id: str = Field(description="Stable identifier for the fact-subjective pair.")
-    fact_ids: List[str] = Field(description="Fact ids that anchor this subjective claim.")
-    paired_fact_digest: str = Field(description="Fact-only digest corresponding to fact_ids.")
-    subjective: SubjectiveCell = Field(description="Subjective claim anchored to facts.")
-    audit_status: Literal["pending", "approved", "rejected", "needs_more_evidence"] = Field(
-        description="Audit result assigned by -1b."
-    )
-    audit_note: str = Field(default="", description="Audit memo written by -1b.")
-
-class ReasoningBoardV1(BaseModel):
-    turn_id: str
-    user_input: str
-    fact_cells: List[FactCell]
-    candidate_pairs: List[AnchoredReasoningPair]
-    open_questions: List[str]
-    search_requests: List[str]
-    final_fact_ids: List[str]
-    final_pair_ids: List[str]
-    must_avoid_claims: List[str]
-    direct_answer_seed: str
-
-class CriticObjection(BaseModel):
-    objection_id: str = Field(description="Stable objection identifier written by the phase_2 critic.")
-    objection_text: str = Field(description="Why the current evidence or claim is still weak, risky, or incomplete.")
-    target_fact_ids: List[str] = Field(description="Fact ids related to the objection.")
-    target_pair_ids: List[str] = Field(description="Reasoning pair ids related to the objection.")
-    severity: Literal["low", "medium", "high"] = Field(description="Operational severity of the objection.")
-    needs_search: bool = Field(description="Whether the objection likely requires another tool call.")
-
-class CriticReport(BaseModel):
-    situational_brief: str = Field(description="Short prosecutor-style summary of the current case.")
-    analytical_thought: str = Field(description="Critical reasoning about gaps, contradictions, and risks.")
-    source_judgments: List[SourceJudgment] = Field(description="Per-source judgments made by the critic.")
-    open_questions: List[str] = Field(description="Questions that remain unresolved.")
-    objections: List[CriticObjection] = Field(description="Structured objections raised by the critic.")
-    recommended_searches: List[str] = Field(description="Exact tool calls or search requests recommended by the critic.")
-    recommended_action: Literal["answer_now", "search_more", "insufficient_evidence"] = Field(
-        description="Critic recommendation before the judge makes a final decision."
-    )
-
-class AdvocateReport(BaseModel):
-    defense_strategy: str = Field(description="How -1a wants to defend or present the case.")
-    summary_of_position: str = Field(description="Short summary of the advocate position.")
-    supported_pair_ids: List[str] = Field(description="Reasoning pairs that the advocate wants to push forward.")
-    response_contract: Dict[str, str] = Field(description="Short response-level contract derived from the strategy.")
-
-class VerdictBoard(BaseModel):
-    answer_now: bool = Field(description="Whether phase_3 may answer now.")
-    requires_search: bool = Field(description="Whether another search/tool step is still required.")
-    approved_fact_ids: List[str] = Field(description="Fact ids approved by -1b.")
-    approved_pair_ids: List[str] = Field(description="Reasoning pair ids approved by -1b.")
-    rejected_pair_ids: List[str] = Field(description="Reasoning pair ids explicitly rejected by -1b.")
-    held_pair_ids: List[str] = Field(description="Reasoning pair ids kept pending due to insufficient evidence.")
-    judge_notes: List[str] = Field(description="Judge notes for phase_3 and future loops.")
-    final_answer_brief: str = Field(description="Short answer brief allowed to reach phase_3.")
-
-class ReasoningBoardV2(BaseModel):
-    turn_id: str
-    user_input: str
-    fact_cells: List[FactCell]
-    candidate_pairs: List[AnchoredReasoningPair]
-    open_questions: List[str]
-    search_requests: List[str]
-    final_fact_ids: List[str]
-    final_pair_ids: List[str]
-    must_avoid_claims: List[str]
-    direct_answer_seed: str
-    critic_report: CriticReport
-    advocate_report: AdvocateReport
-    verdict_board: VerdictBoard
-
-class StepByStepPlan(BaseModel):
-    current_step_goal: str = Field(description="Immediate goal for this turn, such as gather one missing fact or deliver the final answer.")
-    required_tool: str = Field(
-        default="",
-        description="Exact tool instruction that phase_0 should execute for the current step. Use an empty string when no tool is needed."
-    )
-    next_steps_forecast: List[str] = Field(
-        default_factory=list,
-        description="Short forecast of the next 2-3 planned steps after the current step."
-    )
-
-class StrategistReasoningOutput(BaseModel):
-    case_theory: str = Field(description="Master-plan summary based on the user's state and the critic's diagnosis.")
-    action_plan: StepByStepPlan = Field(description="Concrete plan for what the system should do on this turn.")
-    response_strategy: ResponseStrategy | None = Field(
-        default=None,
-        description="Response script only when the current step is final-answer delivery. Leave null when evidence collection or planning comes first."
-    )
-    candidate_pairs: List[AnchoredReasoningPair] = Field(
-        description="Candidate reasoning pairs. Each pair must reference existing fact_ids."
-    )
-
-class AuditorOutput(BaseModel):
-    is_satisfied: bool = Field(description="Whether the turn may proceed to phase_3 without more tool use.")
-    rejection_reason: str = Field(description="Short audit memo explaining the decision.")
-    instruction_to_0: str = Field(description="Exact tool call for phase_0, or empty string.")
-
-
-class ReasoningBudgetPlan(BaseModel):
-    reasoning_budget: int = Field(description="How many reasoning/search loops are worth spending on this turn. 0 means answer directly.")
-    preferred_path: Literal["direct_answer", "internal_reasoning", "tool_first"] = Field(
-        description="Recommended first path for this turn."
-    )
-    should_use_tools: bool = Field(description="Whether tool use is likely worthwhile for this turn.")
-    rationale: str = Field(description="Short operational explanation for the budget choice.")
-
-
-class WarRoomFreedom(BaseModel):
-    granted: bool = Field(description="Whether non-tool reasoning freedom is currently granted.")
-    granted_by: str = Field(description="Who most recently granted or denied the freedom.")
-    scope: Literal["none", "planning_only", "bounded_speculation", "direct_empathy"] = Field(
-        description="Permitted range of non-tool reasoning."
-    )
-    reason: Literal["none", "no_tool_needed", "no_suitable_tool", "tool_would_not_help", "user_requested_direct_thinking", "evidence_gap"] = Field(
-        description="Operational reason for the current freedom state."
-    )
-    note: str = Field(description="Short explanation of the current freedom setting.")
-
-
-class WarRoomDuty(BaseModel):
-    must_label_hypotheses: bool = Field(description="Whether hypotheses must be labeled explicitly.")
-    must_separate_fact_and_opinion: bool = Field(description="Whether facts and interpretations must stay separated.")
-    must_report_missing_info: bool = Field(description="Whether missing information must be surfaced explicitly.")
-    must_not_upgrade_guess_to_fact: bool = Field(description="Whether guesses must never be upgraded into facts.")
-    boundary_note: str = Field(description="Short note about the current speech boundary.")
-
-
-class WarRoomEpistemicDebt(BaseModel):
-    debt_kind: List[str] = Field(description="Kinds of current epistemic debt, such as evidence_gap or tool_gap.")
-    missing_items: List[str] = Field(description="Concrete missing items or unanswered points.")
-    why_tool_not_used: str = Field(description="Why tools were not used or why they would not help enough.")
-    next_best_action: str = Field(description="Best next action to reduce the debt.")
-
-
-class WarRoomAgentNote(BaseModel):
-    agent_name: str = Field(description="Agent that wrote this note, such as phase_2b, -1a, or -1b.")
-    used_freedom: bool = Field(description="Whether the agent actually used non-tool reasoning freedom.")
-    freedom_scope: str = Field(description="Scope of freedom used by the agent.")
-    shortage_reason: str = Field(description="What was missing or constrained at this stage.")
-    missing_items: List[str] = Field(description="Concrete missing items noticed by this agent.")
-    why_no_tool: str = Field(description="Why the agent did not use tools or why tools were insufficient.")
-    allowed_output_boundary: str = Field(description="What this agent believes may safely be said.")
-
-
-class WarRoomStateV1(BaseModel):
-    freedom: WarRoomFreedom
-    duty: WarRoomDuty
-    epistemic_debt: WarRoomEpistemicDebt
-    agent_notes: List[WarRoomAgentNote]
 
 def extract_local_topology(node_ids: list):
     """
@@ -317,6 +427,33 @@ def _has_structured_analysis(analysis_data: dict):
         return True
     return False
 
+
+def _analysis_has_grounded_artifact_evidence(analysis_data: dict):
+    if not isinstance(analysis_data, dict) or not analysis_data:
+        return False
+
+    evidences = analysis_data.get("evidences", [])
+    if isinstance(evidences, list):
+        for item in evidences:
+            if not isinstance(item, dict):
+                continue
+            source_type = str(item.get("source_type") or "").strip().lower()
+            extracted_fact = str(item.get("extracted_fact") or item.get("excerpt") or "").strip()
+            if source_type == "artifact" and extracted_fact:
+                return True
+
+    source_judgments = analysis_data.get("source_judgments", [])
+    if isinstance(source_judgments, list):
+        for item in source_judgments:
+            if not isinstance(item, dict):
+                continue
+            source_type = str(item.get("source_type") or "").strip().lower()
+            accepted_facts = item.get("accepted_facts", [])
+            if source_type == "artifact" and isinstance(accepted_facts, list) and any(str(fact).strip() for fact in accepted_facts):
+                return True
+
+    return False
+
 def _tool_call_to_instruction(tool_name: str, tool_args: dict | None = None):
     tool_args = tool_args or {}
     if not tool_args:
@@ -340,6 +477,12 @@ def _make_auditor_decision(action: str, memo: str = "", tool_name: str = "", too
     elif action == "call_tool" and tool_name:
         instruction = _tool_call_to_instruction(tool_name, normalized_tool_args)
 
+    readiness_decision = readiness_from_auditor_action(
+        action,
+        memo=memo,
+        tool_name=tool_name,
+        tool_args=normalized_tool_args,
+    )
     return {
         "action": action,
         "operational_state": action,
@@ -347,28 +490,9 @@ def _make_auditor_decision(action: str, memo: str = "", tool_name: str = "", too
         "tool_args": normalized_tool_args,
         "instruction": instruction,
         "memo": str(memo or "").strip(),
+        "readiness_decision": readiness_decision,
     }
 
-
-def _tool_candidate_for_case(user_input: str, analysis_data: dict, working_memory: dict | None = None):
-    artifact_hint = _extract_artifact_hint(user_input)
-    if artifact_hint:
-        return {
-            "tool_name": "tool_read_artifact",
-            "tool_args": {"artifact_hint": artifact_hint},
-            "memo": "Artifact review is needed before answering.",
-        }
-
-    if _should_default_to_memory_search(user_input, analysis_data, working_memory or {}):
-        keyword = _normalize_search_keyword(str((analysis_data or {}).get("analytical_thought") or user_input))
-        if keyword:
-            return {
-                "tool_name": "tool_search_memory",
-                "tool_args": {"keyword": keyword},
-                "memo": "Memory search may provide missing grounding for this turn.",
-            }
-
-    return None
 
 def _fallback_reasoning_budget_plan(user_input: str, working_memory: dict, artifact_hint: str = ""):
     text = str(user_input or "").strip()
@@ -381,33 +505,26 @@ def _fallback_reasoning_budget_plan(user_input: str, working_memory: dict, artif
         }
     if _followup_context_expected(text, "", working_memory):
         return {
-            "reasoning_budget": 0,
-            "preferred_path": "direct_answer",
+            "reasoning_budget": 1,
+            "preferred_path": "internal_reasoning",
             "should_use_tools": False,
-            "rationale": "A short direct reply is enough for this follow-up.",
-        }
-    if _should_default_to_memory_search(text, {}, working_memory):
-        return {
-            "reasoning_budget": 2,
-            "preferred_path": "tool_first",
-            "should_use_tools": True,
-            "rationale": "Current evidence looks thin, so retrieval should come first.",
+            "rationale": "This is a follow-up, but the strategist should still rebuild the concrete continuation contract before delivery.",
         }
     return {
         "reasoning_budget": 1,
         "preferred_path": "internal_reasoning",
         "should_use_tools": False,
-        "rationale": "One round of internal reasoning is appropriate before responding.",
+        "rationale": "Fallback budget is intentionally thin; start-gate and planner contracts decide tools.",
     }
 
-def _plan_reasoning_budget(user_input: str, recent_context: str, working_memory: dict):
+def _base_plan_reasoning_budget(user_input: str, recent_context: str, working_memory: dict):
     artifact_hint = _extract_artifact_hint(user_input)
-    working_memory_packet = _working_memory_packet_for_prompt(working_memory)
-    sys_prompt = f"""당신은 ANIMA의 추론 예산 플래너다.
+    working_memory_packet = _working_memory_packet_for_prompt(working_memory, role="start_gate")
+    sys_prompt = f"""You are ANIMA's thin reasoning-budget planner.
 
-현재 사용자 입력, 최근 맥락, working_memory를 보고 이번 턴에 어느 정도의 사고 깊이가 필요한지 결정하라.
-의미 판단은 모델이 하되, 과소사고와 과잉탐색을 모두 피하라.
-모든 자유서술 필드는 한국어로 짧고 읽기 쉽게 작성하라.
+Read the current user input, recent context, and working memory. Decide only how much
+thinking depth this turn needs. Do not choose concrete tools, rewrite the user's goal,
+or produce final answer wording.
 
 [user_input]
 {user_input}
@@ -419,21 +536,21 @@ def _plan_reasoning_budget(user_input: str, recent_context: str, working_memory:
 {working_memory_packet}
 
 [artifact_hint]
-{artifact_hint if artifact_hint else '없음'}
+{artifact_hint if artifact_hint else '(none)'}
 
 [reasoning_budget scale]
-- 0: 직접 답변이면 충분함
-- 1: 짧은 내부 사고 1회
-- 2: 더 깊은 내부 점검 또는 근거 검토
-- 3~4: 정말 복잡해서 추가 작업이 필요한 턴
+- 0: direct delivery is enough.
+- 1: light reasoning or one short continuation step.
+- 2: moderate reasoning or evidence review may be needed.
+- 3~4: genuinely complex work needing extra planning.
 
 [rules]
-1. 단순 후속 응답이면 direct_answer를 고른다.
-2. 의미는 분명하지만 한 번 더 조심스럽게 볼 필요가 있으면 internal_reasoning을 고른다.
-3. 문서, 부가자료, 검색 회수가 핵심이면 tool_first를 고른다.
-4. artifact_hint가 있으면 tool_first를 강하게 우선한다.
-5. reasoning_budget은 계획이지 딱딱한 하드 스톱이 아니다.
-6. preferred_path는 direct_answer, internal_reasoning, tool_first 중 하나여야 한다.
+1. For simple continuation or social response, choose delivery_contract.
+2. For ambiguous but answerable turns, choose internal_reasoning.
+3. If a document, artifact, or explicit external source must be read, choose tool_first.
+4. If artifact_hint exists, strongly prefer tool_first.
+5. reasoning_budget is a budget, not an action plan.
+6. preferred_path must be one of delivery_contract, internal_reasoning, tool_first.
 """
 
     try:
@@ -441,12 +558,13 @@ def _plan_reasoning_budget(user_input: str, recent_context: str, working_memory:
         res = structured_llm.invoke([SystemMessage(content=sys_prompt)])
         plan = res.model_dump()
         plan["reasoning_budget"] = max(0, min(int(plan.get("reasoning_budget", 1)), 4))
+        plan["preferred_path"] = _normalize_reasoning_preferred_path(plan.get("preferred_path"))
         if artifact_hint and plan["preferred_path"] != "tool_first":
             plan["preferred_path"] = "tool_first"
             plan["should_use_tools"] = True
         return plan
     except Exception as e:
-        print(f"[추론 예산 플래너] 구조화 출력 예외로 fallback을 사용합니다: {e}")
+        print(f"[Reasoning fallback] structured output failed; using fallback plan: {e}")
         return _fallback_reasoning_budget_plan(user_input, working_memory, artifact_hint=artifact_hint)
 
 def _decision_from_instruction(instruction: str, is_satisfied: bool, memo: str):
@@ -463,6 +581,11 @@ def _decision_from_instruction(instruction: str, is_satisfied: bool, memo: str):
             return _make_auditor_decision("phase_3", memo=memo)
         if tool_name == "tool_call_119_rescue":
             return _make_auditor_decision("phase_119", memo=memo)
+        if tool_name in {"tool_search_memory", "tool_search_field_memos"}:
+            repaired = _repair_search_tool_request(tool_name, tool_args, fallback_text=stripped)
+            if not repaired:
+                return None
+            tool_name, tool_args = repaired
         return _make_auditor_decision("call_tool", memo=memo, tool_name=tool_name, tool_args=tool_args)
 
     if not is_satisfied:
@@ -504,198 +627,6 @@ def _extract_exact_tool_call(suggestion: str):
     return ""
 
 
-def _raw_read_report_packet_for_prompt(raw_read_report: dict):
-    if not raw_read_report:
-        return "사용 가능한 원문 검토 보고가 없습니다."
-    packet = {
-        "read_mode": raw_read_report.get("read_mode", ""),
-        "reviewed_all_input": raw_read_report.get("reviewed_all_input", False),
-        "source_summary": raw_read_report.get("source_summary", ""),
-        "items": raw_read_report.get("items", []),
-        "coverage_notes": raw_read_report.get("coverage_notes", ""),
-    }
-    try:
-        return json.dumps(packet, ensure_ascii=False, indent=2)
-    except TypeError:
-        return str(packet)
-
-def _build_source_relay_packet(raw_read_report: dict):
-    if not isinstance(raw_read_report, dict) or not raw_read_report:
-        return {
-            "read_mode": "empty",
-            "reviewed_all_input": False,
-            "global_source_summary": "",
-            "global_coverage_notes": "",
-            "source_packets": [],
-        }
-
-    read_mode = str(raw_read_report.get("read_mode") or "").strip() or "empty"
-    reviewed_all_input = bool(raw_read_report.get("reviewed_all_input", False))
-    global_source_summary = str(raw_read_report.get("source_summary") or "").strip()
-    global_coverage_notes = str(raw_read_report.get("coverage_notes") or "").strip()
-    grouped = {}
-
-    for item in raw_read_report.get("items", []):
-        if not isinstance(item, dict):
-            continue
-        source_id = str(item.get("source_id") or "").strip() or "unknown_source"
-        source_type = str(item.get("source_type") or "").strip() or "unknown"
-        key = (source_id, source_type)
-        packet = grouped.setdefault(key, {
-            "source_id": source_id,
-            "source_type": source_type,
-            "source_summary": "",
-            "coverage_notes": "",
-            "must_forward_facts": [],
-            "quoted_excerpts": [],
-            "coverage_complete": reviewed_all_input,
-        })
-        observed_fact = str(item.get("observed_fact") or "").strip()
-        excerpt = str(item.get("excerpt") or "").strip()
-        if observed_fact and observed_fact not in packet["must_forward_facts"]:
-            packet["must_forward_facts"].append(observed_fact)
-        if excerpt and excerpt not in packet["quoted_excerpts"]:
-            packet["quoted_excerpts"].append(excerpt)
-
-    source_packets = []
-    if grouped:
-        multi_source = len(grouped) > 1
-        for (_, _), packet in grouped.items():
-            source_id = packet["source_id"]
-            source_type = packet["source_type"]
-            packet["source_summary"] = (
-                f"{source_type} source `{source_id}` was reviewed by phase_2a."
-                if multi_source else
-                (global_source_summary or f"{source_type} source `{source_id}` was reviewed by phase_2a.")
-            )
-            packet["coverage_notes"] = global_coverage_notes or "phase_2a completed a raw read pass for this source."
-            packet["must_forward_facts"] = packet["must_forward_facts"][:6]
-            packet["quoted_excerpts"] = packet["quoted_excerpts"][:3]
-            source_packets.append(packet)
-
-    if not source_packets and read_mode == "current_turn_only":
-        source_packets.append({
-            "source_id": "current_user_turn",
-            "source_type": "current_turn",
-            "source_summary": global_source_summary or "The current user turn was reviewed as the only available raw source.",
-            "coverage_notes": global_coverage_notes or "No external raw source was available in this turn.",
-            "must_forward_facts": [],
-            "quoted_excerpts": [],
-            "coverage_complete": reviewed_all_input,
-        })
-
-    return {
-        "read_mode": read_mode,
-        "reviewed_all_input": reviewed_all_input,
-        "global_source_summary": global_source_summary,
-        "global_coverage_notes": global_coverage_notes,
-        "source_packets": source_packets,
-    }
-
-
-def _source_relay_packet_for_prompt(source_relay_packet: dict):
-    if not isinstance(source_relay_packet, dict) or not source_relay_packet:
-        return "사용 가능한 소스 릴레이 패킷이 없습니다."
-    try:
-        return json.dumps(source_relay_packet, ensure_ascii=False, indent=2)
-    except TypeError:
-        return str(source_relay_packet)
-
-def _normalize_analysis_with_source_relay(analysis_dict: dict, source_relay_packet: dict):
-    if not isinstance(analysis_dict, dict):
-        analysis_dict = {}
-    if not isinstance(source_relay_packet, dict):
-        source_relay_packet = {}
-
-    normalized = json.loads(json.dumps(analysis_dict, ensure_ascii=False))
-    source_packets = source_relay_packet.get("source_packets", [])
-    if not isinstance(source_packets, list):
-        source_packets = []
-
-    judgments = normalized.get("source_judgments", [])
-    if not isinstance(judgments, list):
-        judgments = []
-    judgment_map = {}
-    for judgment in judgments:
-        if not isinstance(judgment, dict):
-            continue
-        key = (
-            str(judgment.get("source_id") or "").strip(),
-            str(judgment.get("source_type") or "").strip(),
-        )
-        judgment_map[key] = judgment
-
-    normalized_judgments = []
-    for packet in source_packets:
-        if not isinstance(packet, dict):
-            continue
-        source_id = str(packet.get("source_id") or "").strip() or "unknown_source"
-        source_type = str(packet.get("source_type") or "").strip() or "unknown"
-        key = (source_id, source_type)
-        existing = judgment_map.get(key, {})
-        accepted_facts = existing.get("accepted_facts", [])
-        if not isinstance(accepted_facts, list):
-            accepted_facts = []
-        contested_facts = existing.get("contested_facts", [])
-        if not isinstance(contested_facts, list):
-            contested_facts = []
-        missing_info = existing.get("missing_info", [])
-        if not isinstance(missing_info, list):
-            missing_info = []
-
-        must_forward_facts = [
-            str(fact).strip()
-            for fact in packet.get("must_forward_facts", [])
-            if str(fact).strip()
-        ]
-        if not accepted_facts and must_forward_facts:
-            accepted_facts = must_forward_facts[:3]
-
-        source_status = str(existing.get("source_status") or "").strip().lower()
-        if source_status not in {"pass", "objection", "ambiguous", "insufficient"}:
-            source_status = "pass" if accepted_facts else "ambiguous"
-
-        normalized_judgments.append({
-            "source_id": source_id,
-            "source_type": source_type,
-            "source_status": source_status,
-            "accepted_facts": _dedupe_keep_order([str(f).strip() for f in accepted_facts if str(f).strip()])[:5],
-            "contested_facts": _dedupe_keep_order([str(f).strip() for f in contested_facts if str(f).strip()])[:5],
-            "objection_reason": str(existing.get("objection_reason") or "").strip(),
-            "missing_info": _dedupe_keep_order([str(f).strip() for f in missing_info if str(f).strip()])[:4],
-            "search_needed": bool(existing.get("search_needed", False)),
-        })
-
-    normalized["source_judgments"] = normalized_judgments
-
-    evidences = normalized.get("evidences", [])
-    if not isinstance(evidences, list):
-        evidences = []
-    existing_evidence_keys = {
-        (
-            str(item.get("source_id") or "").strip(),
-            str(item.get("extracted_fact") or "").strip(),
-        )
-        for item in evidences
-        if isinstance(item, dict)
-    }
-    for judgment in normalized_judgments:
-        source_id = str(judgment.get("source_id") or "").strip()
-        source_type = str(judgment.get("source_type") or "").strip()
-        for fact in judgment.get("accepted_facts", []):
-            key = (source_id, str(fact).strip())
-            if not key[1] or key in existing_evidence_keys:
-                continue
-            evidences.append({
-                "source_id": source_id,
-                "source_type": source_type,
-                "extracted_fact": str(fact).strip(),
-            })
-            existing_evidence_keys.add(key)
-    normalized["evidences"] = evidences
-    return normalized
-
-
 def _enforce_recent_dialogue_review_analysis(analysis_dict: dict, raw_read_report: dict):
     if not isinstance(analysis_dict, dict):
         analysis_dict = {}
@@ -706,13 +637,30 @@ def _enforce_recent_dialogue_review_analysis(analysis_dict: dict, raw_read_repor
     if read_mode != "recent_dialogue_review":
         return analysis_dict
 
+    normalized = json.loads(json.dumps(analysis_dict, ensure_ascii=False))
     raw_items = raw_read_report.get("items", [])
     if not isinstance(raw_items, list):
         raw_items = []
-    if len(raw_items) < 2:
-        return analysis_dict
-
-    normalized = json.loads(json.dumps(analysis_dict, ensure_ascii=False))
+    if _recent_dialogue_review_failed(raw_read_report):
+        existing_brief = str(normalized.get("situational_brief") or "").strip()
+        existing_thought = str(normalized.get("analytical_thought") or "").strip()
+        normalized["investigation_status"] = "INCOMPLETE"
+        normalized["situational_brief"] = (
+            "Recent dialogue review failed because concrete recent raw turns were not actually available. "
+            "Do not pretend the recent conversation was inspected."
+        )
+        if existing_brief and existing_brief != normalized["situational_brief"]:
+            normalized["situational_brief"] += f" Existing brief: {existing_brief}"
+        fail_note = (
+            "recent_dialogue_review requested concrete recent turns, but phase_2a did not recover enough "
+            "recent raw dialogue items. The case must stay incomplete and should not loop as if review succeeded."
+        )
+        normalized["analytical_thought"] = (
+            f"{existing_thought}\n{fail_note}".strip()
+            if existing_thought
+            else fail_note
+        )
+        return normalized
 
     evidences = normalized.get("evidences", [])
     if not isinstance(evidences, list):
@@ -794,36 +742,10 @@ def _phase_2_tool_guide():
         "- tool_scroll_chat_log(target_id=\"...\", direction=\"both\", limit=15)\n"
         "- tool_read_artifact(artifact_hint=\"...\")\n"
         "- tool_scan_db_schema(dummy_keyword=\"schema\")\n"
-        "- tool_scan_trend_u_function(keyword=\"...\", track_type=\"Episode\")\n"
-        "- tool_scan_trend_u_function_3d(keyword_z=\"...\", keyword_anti_z=\"...\", keyword_y=\"...\", track_type=\"PastRecord\")\n"
     )
 
 
-def _analysis_packet_for_prompt(analysis_data: dict, include_thought: bool = True):
-    if not analysis_data:
-        return "사용 가능한 구조화 2차 분석 보고가 없습니다."
 
-    packet = {
-        "evidences": analysis_data.get("evidences", []),
-        "source_judgments": analysis_data.get("source_judgments", []),
-        "situational_brief": analysis_data.get("situational_brief", ""),
-        "investigation_status": analysis_data.get("investigation_status", ""),
-    }
-    if include_thought:
-        packet["analytical_thought"] = analysis_data.get("analytical_thought", "")
-
-    try:
-        return json.dumps(packet, ensure_ascii=False, indent=2)
-    except TypeError:
-        return str(packet)
-
-def _working_memory_packet_for_prompt(working_memory: dict):
-    if not working_memory:
-        return "사용 가능한 구조화 working_memory가 없습니다."
-    try:
-        return json.dumps(working_memory, ensure_ascii=False, indent=2)
-    except TypeError:
-        return str(working_memory)
 
 def _raw_reference_excerpt(search_results: str, limit: int = 4000):
     raw_reference = str(search_results or "").strip()
@@ -843,16 +765,16 @@ def _phase3_followup_strength(loop_count: int):
     if current_loop <= 1:
         return {
             "level": "gentle",
-            "instruction": "답변 범위를 조금만 더 좁혀 주시면 더 정확하게 답할 수 있습니다.",
+            "instruction": "Ask for one small clarification if the answer boundary is still unclear.",
         }
     if current_loop == 2:
         return {
             "level": "direct",
-            "instruction": "정확한 질문, 항목, 또는 슬라이드를 지정해 주시면 그 지점을 바로 답하겠습니다.",
+            "instruction": "Ask the user to name the exact question, item, or source needed.",
         }
     return {
         "level": "firm",
-        "instruction": "정확한 질문 번호나 항목명을 지정해 주세요. 여기서부터는 제가 계속 추측하면 안 됩니다.",
+        "instruction": "Stop guessing and ask for a concrete target before continuing.",
     }
 
 def _phase3_reference_policy(search_results: str, loop_count: int, small_limit: int = 1200):
@@ -888,6 +810,667 @@ def _phase3_reference_policy(search_results: str, loop_count: int, small_limit: 
         "note": "The raw reference is too large, so phase_3 should rely on follow-up guidance instead.",
     }
 
+
+def _compact_user_facing_summary(text: str, limit: int = 160):
+    normalized = re.sub(r"\s+", " ", str(text or "").strip())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _parse_search_result_hits(raw_reference: str):
+    return _parse_search_result_hits_impl(
+        raw_reference,
+        compact_user_facing_summary=_compact_user_facing_summary,
+    )
+
+
+def _format_findings_first_delivery(user_input: str, judge_speaker_packet: dict):
+    return _format_findings_first_delivery_impl(
+        user_input,
+        judge_speaker_packet,
+        compact_user_facing_summary=_compact_user_facing_summary,
+        extract_explicit_search_keyword=_extract_explicit_search_keyword,
+    )
+
+
+def _extract_turns_from_recent_dialogue_report(raw_read_report: dict, max_turns: int = 6):
+    return _extract_turns_from_recent_dialogue_report_impl(raw_read_report, max_turns=max_turns)
+
+
+def _recent_dialogue_brief_text(turns: list[dict], user_input: str = ""):
+    return _recent_dialogue_brief_text_impl(
+        turns,
+        user_input=user_input,
+        compact_user_facing_summary=_compact_user_facing_summary,
+    )
+
+
+def _build_recent_dialogue_brief(raw_read_report: dict, analysis_data: dict | None = None, user_input: str = ""):
+    return _build_recent_dialogue_brief_impl(
+        raw_read_report,
+        analysis_data,
+        user_input=user_input,
+        compact_user_facing_summary=_compact_user_facing_summary,
+    )
+
+
+def _field_memo_analysis_brief_for_delivery(analysis_data: dict):
+    return _field_memo_analysis_brief_for_delivery_impl(analysis_data)
+
+
+def _split_field_memo_fact_blob(value: str) -> list[str]:
+    return [
+        _compact_user_facing_summary(item, limit=180)
+        for item in _split_field_memo_fact_blob_impl(value)
+    ]
+
+
+def _compact_contract_key(text: str):
+    normalized = unicodedata.normalize("NFKC", str(text or "").lower())
+    return re.sub(r"\s+", "", normalized)
+
+
+def _field_memo_evidence_text(item: dict):
+    return _field_memo_evidence_text_impl(item)
+
+
+def _field_memo_metadata_text(item: dict):
+    return _field_memo_metadata_text_impl(item)
+
+
+def _field_memo_text(item: dict):
+    return _field_memo_text_impl(item)
+
+
+def _derive_user_goal_contract(user_input: str, source_lane: str = "field_memo_review"):
+    text = unicodedata.normalize("NFKC", str(user_input or "").strip())
+    return UserGoalContract(
+        user_goal=_normalized_goal_from_user_input(text),
+        source_lane=source_lane,
+        output_act="answer",
+        slot_to_fill="",
+        success_criteria=["Answer the normalized current user goal without broadening it."],
+        forbidden_drift=[],
+        evidence_required=False,
+    ).model_dump()
+
+
+def _extract_user_name_candidates_from_text(text: str):
+    normalized = unicodedata.normalize("NFKC", str(text or "").strip())
+    if not normalized:
+        return []
+    names = []
+    patterns = [
+        r"\bname\s*(?:is|:|=)\s*([A-Za-z][A-Za-z0-9_-]{1,30})",
+        r"\ub0b4\s*\uc774\ub984\s*(?:\uc740|\ub294|:|=)?\s*([\uac00-\ud7a3]{2,4})",
+        r"\ub098\uc758\s*\uc774\ub984\s*(?:\uc740|\ub294|:|=)?\s*([\uac00-\ud7a3]{2,4})",
+        r"\uc0ac\uc6a9\uc790(?:\uc758)?\s*\uc774\ub984\s*(?:\uc740|\ub294|:|=)?\s*([\uac00-\ud7a3]{2,4})",
+    ]
+    for pattern in patterns:
+        for match in re.findall(pattern, normalized, flags=re.IGNORECASE):
+            candidate = str(match or "").strip()
+            if 2 <= len(candidate) <= 30:
+                names.append(candidate)
+    return _dedupe_keep_order(names)[:3]
+
+
+def _contract_identity_names_from_facts(facts: list[str], answer_brief: str = ""):
+    names = []
+    for value in list(facts or []) + ([answer_brief] if answer_brief else []):
+        value_text = str(value or "")
+        if not _fact_supports_user_canonical_name_claim(value_text):
+            continue
+        names.extend(_extract_canonical_name_candidates_from_identity_claim(value_text))
+        names.extend(_extract_user_name_candidates_from_text(value_text))
+    return _dedupe_keep_order(names)[:3]
+
+
+def _extract_canonical_name_candidates_from_identity_claim(value: str):
+    text = unicodedata.normalize("NFKC", str(value or "")).strip()
+    if not text:
+        return []
+    names: list[str] = []
+    if "\ud5c8\uc815\ud6c4" in text:
+        names.append("\ud5c8\uc815\ud6c4")
+    direct_patterns = [
+        r"\ub0b4\s*\uc774\ub984\s*(?:\uc740|\ub294|\uc774|\uac00|:|=)?\s*([\uac00-\ud7a3]{2,4})",
+        r"\ub098\uc758\s*\uc774\ub984\s*(?:\uc740|\ub294|\uc774|\uac00|:|=)?\s*([\uac00-\ud7a3]{2,4})",
+        r"\uc0ac\uc6a9\uc790(?:\uc758)?\s*\uc774\ub984\s*(?:\uc740|\ub294|\uc774|\uac00|:|=)?\s*([\uac00-\ud7a3]{2,4})",
+        r"\uc0ac\uc6a9\uc790\ub294\s*([\uac00-\ud7a3]{2,4})",
+        r"\uac1c\ubc1c\uc790(?:\ub294|\uac00|\(|\s)*([\uac00-\ud7a3]{2,4})",
+    ]
+    for pattern in direct_patterns:
+        for match in re.findall(pattern, text):
+            candidate = str(match or "").strip()
+            if 2 <= len(candidate) <= 4:
+                names.append(candidate)
+    return _dedupe_keep_order(names)[:3]
+
+
+def _fact_supports_user_canonical_name_claim(value: str):
+    text = unicodedata.normalize("NFKC", str(value or "")).strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    compact = re.sub(r"\s+", "", lowered)
+
+    # A user-name slot must be backed by an identity claim, not by any list of
+    # Korean names. This prevents friend lists or story character lists from
+    # satisfying "say my name".
+    list_context_markers = [
+        "\uce5c\uad6c",          # friend
+        "\ub4f1\uc7a5\uc778\ubb3c",  # character
+        "\uce90\ub9ad\ud130",      # character
+        "\uac8c\uc784",          # game
+        "\uc624\ubaa8\ub9ac",      # omori
+        "\uc18c\uc124",          # fiction/story
+        "\uc774\uc57c\uae30",      # story
+    ]
+    identity_markers = [
+        "\ub0b4\uc774\ub984",
+        "\ub098\uc758\uc774\ub984",
+        "\uc0ac\uc6a9\uc790\uc774\ub984",
+        "\uc0ac\uc6a9\uc790",
+        "\ubcf8\uba85",
+        "\uac1c\ubc1c\uc790",
+        "\ub9cc\ub4e0",
+        "\ud5c8\uc815\ud6c4",
+        "person profile",
+        "canonical_name",
+    ]
+
+    has_identity_anchor = any(marker in compact for marker in identity_markers)
+    if any(marker in compact for marker in list_context_markers) and not has_identity_anchor:
+        return False
+
+    direct_claim_patterns = [
+        r"\ub0b4\s*\uc774\ub984\s*(?:\uc740|\ub294|\uc774|\uac00|:|=)?\s*[\uac00-\ud7a3]{2,4}",
+        r"\ub098\uc758\s*\uc774\ub984\s*(?:\uc740|\ub294|\uc774|\uac00|:|=)?\s*[\uac00-\ud7a3]{2,4}",
+        r"\uc0ac\uc6a9\uc790(?:\uc758)?\s*\uc774\ub984\s*(?:\uc740|\ub294|\uc774|\uac00|:|=)?\s*[\uac00-\ud7a3]{2,4}",
+        r"\uc0ac\uc6a9\uc790\ub294\s*[\uac00-\ud7a3]{2,4}",
+        r"\uac1c\ubc1c\uc790(?:\ub294|\uac00|\(|\s)*[\uac00-\ud7a3]{2,4}",
+    ]
+    if any(re.search(pattern, text) for pattern in direct_claim_patterns):
+        return True
+
+    # The current project repeatedly identifies the human developer/user as
+    # Heo Jeonghu; still require an identity-ish anchor around the name.
+    return "\ud5c8\uc815\ud6c4" in text and has_identity_anchor
+
+
+def _contract_satisfied_by_facts(contract: dict, facts: list[str], answer_brief: str = ""):
+    slot = str((contract or {}).get("slot_to_fill") or "").strip()
+    if slot == "user.canonical_name":
+        return bool(_contract_identity_names_from_facts(facts, answer_brief))
+    return True
+
+
+def _contract_status_packet(contract: dict, facts: list[str], answer_brief: str = ""):
+    slot = str((contract or {}).get("slot_to_fill") or "").strip()
+    if not slot:
+        return "satisfied", [], ""
+    if _contract_satisfied_by_facts(contract, facts, answer_brief):
+        return "satisfied", [], ""
+    directive = (
+        f"The current evidence does not fill `{slot}` directly. "
+        "Do not widen into a nearby analysis; look for evidence that fills the slot itself."
+    )
+    return "missing_slot", [slot], directive
+
+
+def _filled_slots_from_contract(contract: dict, facts: list[str], answer_brief: str = ""):
+    slot = str((contract or {}).get("slot_to_fill") or "").strip()
+    if not slot:
+        return {}
+    facts = [str(fact).strip() for fact in facts or [] if str(fact).strip()]
+    if not _contract_satisfied_by_facts(contract, facts, answer_brief):
+        return {}
+    if slot == "user.canonical_name":
+        names = _contract_identity_names_from_facts(facts, answer_brief)
+        return {slot: names[0]} if names else {}
+    if answer_brief:
+        return {slot: _compact_user_facing_summary(answer_brief, 240)}
+    return {slot: facts[:4]} if facts else {}
+
+
+# Canonical goal-contract bindings live in Core.goal_contracts.
+_derive_user_goal_contract = _derive_user_goal_contract_impl
+_extract_user_name_candidates_from_text = _extract_user_name_candidates_from_text_impl
+_extract_canonical_name_candidates_from_identity_claim = _extract_canonical_name_candidates_from_identity_claim_impl
+_fact_supports_user_canonical_name_claim = _fact_supports_user_canonical_name_claim_impl
+_contract_identity_names_from_facts = _contract_identity_names_from_facts_impl
+_contract_satisfied_by_facts = _contract_satisfied_by_facts_impl
+_contract_status_packet = _contract_status_packet_impl
+_filled_slots_from_contract = _filled_slots_from_contract_impl
+
+
+def _rejected_sources_from_field_memo_judgments(judgments: list[dict]):
+    return _rejected_sources_from_field_memo_judgments_impl(judgments)
+
+
+
+def _field_memo_tokens(text: str):
+    return _field_memo_tokens_impl(text)
+
+
+def _field_memo_evidence_kind(item: dict):
+    return _field_memo_evidence_kind_impl(
+        item,
+        split_field_memo_fact_blob=_split_field_memo_fact_blob,
+        compact_user_facing_summary=_compact_user_facing_summary,
+    )
+
+def _field_memo_facts_from_item(item: dict):
+    return _field_memo_facts_from_item_impl(
+        item,
+        split_field_memo_fact_blob=_split_field_memo_fact_blob,
+        compact_user_facing_summary=_compact_user_facing_summary,
+    )
+
+
+def _judge_field_memo_item_for_goal(item: dict, user_input: str):
+    return _judge_field_memo_item_for_goal_impl(
+        item,
+        user_input,
+        split_field_memo_fact_blob=_split_field_memo_fact_blob,
+        compact_user_facing_summary=_compact_user_facing_summary,
+        derive_user_goal_contract=_derive_user_goal_contract,
+        contract_satisfied_by_facts=_contract_satisfied_by_facts,
+    )
+
+def _field_memo_judgments_from_source_judgments(source_judgments: list[dict], item_ids: set[str]):
+    return _field_memo_judgments_from_source_judgments_impl(
+        source_judgments,
+        item_ids,
+        normalize_short_string_list=_normalize_short_string_list,
+    )
+
+def _enforce_field_memo_judgments(analysis_dict: dict, raw_read_report: dict, user_input: str):
+    return _enforce_field_memo_judgments_impl(
+        analysis_dict,
+        raw_read_report,
+        user_input,
+        split_field_memo_fact_blob=_split_field_memo_fact_blob,
+        compact_user_facing_summary=_compact_user_facing_summary,
+        derive_user_goal_contract=_derive_user_goal_contract,
+        contract_satisfied_by_facts=_contract_satisfied_by_facts,
+        contract_status_packet=_contract_status_packet,
+        filled_slots_from_contract=_filled_slots_from_contract,
+        normalize_short_string_list=_normalize_short_string_list,
+    )
+
+
+def _build_field_memo_user_brief(raw_read_report: dict, analysis_data: dict | None = None):
+    return _build_field_memo_user_brief_impl(
+        raw_read_report,
+        analysis_data,
+        compact_user_facing_summary=_compact_user_facing_summary,
+    )
+
+
+def _field_memo_review_has_concrete_memos(raw_read_report: dict):
+    return _field_memo_review_has_concrete_memos_impl(raw_read_report)
+
+
+def _turn_requires_grounded_delivery(user_input: str, recent_context: str = ""):
+    return _turn_requires_grounded_delivery_impl(
+        user_input,
+        recent_context,
+        answer_mode_policy_for_turn=_answer_mode_policy_for_turn,
+    )
+
+
+def _answer_mode_policy_for_turn(
+    user_input: str,
+    recent_context: str = "",
+    goal_contract: dict | None = None,
+):
+    return _answer_mode_policy_for_turn_impl(
+        user_input,
+        recent_context,
+        goal_contract,
+        is_memory_state_disclosure_turn=is_memory_state_disclosure_turn,
+        looks_like_current_turn_memory_story_share=_looks_like_current_turn_memory_story_share,
+        looks_like_memo_recall_turn=looks_like_memo_recall_turn,
+        extract_explicit_search_keyword=_extract_explicit_search_keyword,
+        extract_artifact_hint=_extract_artifact_hint,
+        is_recent_dialogue_review_turn=_is_recent_dialogue_review_turn,
+        is_assistant_investigation_request_turn=_is_assistant_investigation_request_turn,
+    )
+
+
+def _answer_mode_policy_from_state(state: dict | None, analysis_data: dict | None = None):
+    return _answer_mode_policy_from_state_impl(
+        state,
+        analysis_data,
+        answer_mode_policy_for_turn=_answer_mode_policy_for_turn,
+    )
+
+
+
+
+def _answer_mode_policy_allows_direct_phase3(policy: dict | None):
+    return _answer_mode_policy_allows_direct_phase3_impl(policy)
+
+
+def _response_strategy_from_answer_mode_policy(
+    user_input: str,
+    policy: dict | None,
+    current_turn_facts: list[str] | None = None,
+):
+    return _response_strategy_from_answer_mode_policy_impl(
+        user_input,
+        policy,
+        current_turn_facts,
+    )
+
+
+def _turn_allows_parametric_knowledge_blend(user_input: str, recent_context: str = ""):
+    return _turn_allows_parametric_knowledge_blend_impl(
+        user_input,
+        recent_context,
+        answer_mode_policy_for_turn=_answer_mode_policy_for_turn,
+    )
+
+
+def _extract_current_turn_grounding_facts(user_input: str, contract: dict | None = None):
+    return _extract_current_turn_grounding_facts_impl(
+        user_input,
+        contract,
+        is_memory_state_disclosure_turn=is_memory_state_disclosure_turn,
+        looks_like_current_turn_memory_story_share=_looks_like_current_turn_memory_story_share,
+        compact_user_facing_summary=_compact_user_facing_summary,
+    )
+
+
+def _field_memo_answer_ready_for_phase3(raw_read_report: dict, analysis_data: dict, user_input: str):
+    return _field_memo_answer_ready_for_phase3_impl(
+        raw_read_report,
+        analysis_data,
+        user_input,
+        build_field_memo_user_brief=_build_field_memo_user_brief,
+        field_memo_packet_ready_for_delivery=_field_memo_packet_ready_for_delivery,
+    )
+
+
+def _field_memo_packet_ready_for_delivery(packet: dict, analysis_data: dict | None = None, user_input: str = ""):
+    return _field_memo_packet_ready_for_delivery_impl(
+        packet,
+        analysis_data,
+        user_input,
+        derive_user_goal_contract=_derive_user_goal_contract,
+        contract_satisfied_by_facts=_contract_satisfied_by_facts,
+    )
+
+
+def _recent_dialogue_ready_for_phase3(raw_read_report: dict, analysis_data: dict, user_input: str):
+    return _recent_dialogue_ready_for_phase3_impl(
+        raw_read_report,
+        analysis_data,
+        user_input,
+        build_recent_dialogue_brief=_build_recent_dialogue_brief,
+    )
+
+
+def _grounded_source_ready_for_phase3(state: AnimaState, analysis_data: dict, user_input: str):
+    return _grounded_source_ready_for_phase3_impl(
+        state,
+        analysis_data,
+        user_input,
+        field_memo_answer_ready_for_phase3=_field_memo_answer_ready_for_phase3,
+        recent_dialogue_ready_for_phase3=_recent_dialogue_ready_for_phase3,
+        analysis_has_answer_relevant_evidence=_analysis_has_answer_relevant_evidence,
+        operation_plan_from_state=_operation_plan_from_state,
+    )
+
+
+def _guard_phase3_decision_for_grounded_turn(
+    state: AnimaState,
+    decision: dict,
+    strategist_output: dict,
+    analysis_data: dict,
+    working_memory: dict,
+    loop_count: int,
+    reasoning_budget: int,
+    response_strategy: dict | None = None,
+):
+    return _guard_phase3_decision_for_grounded_turn_impl(
+        state,
+        decision,
+        strategist_output,
+        analysis_data,
+        working_memory,
+        loop_count,
+        reasoning_budget,
+        response_strategy=response_strategy,
+        answer_mode_policy_from_state=_answer_mode_policy_from_state,
+        short_term_context_strategy_is_usable=_short_term_context_strategy_is_usable,
+        phase3_delivery_payload_ready_for_gate=_phase3_delivery_payload_ready_for_gate,
+        war_room_output_is_usable=_war_room_output_is_usable,
+        war_room_seed_alignment_issue=_war_room_seed_alignment_issue,
+        soft_reasoning_budget_limit=_soft_reasoning_budget_limit,
+        decision_from_strategist_tool_contract=_decision_from_strategist_tool_contract,
+        start_gate_requests_memory_recall=_start_gate_requests_memory_recall,
+        compiled_memory_recall_queries=_compiled_memory_recall_queries,
+        tool_carryover_from_state=_tool_carryover_from_state,
+        make_auditor_decision=_make_auditor_decision,
+        gemini_scroll_candidate_from_state=_gemini_scroll_candidate_from_state,
+        logger=print,
+    )
+
+
+def _build_findings_first_packet(user_input: str, judge_speaker_packet: dict):
+    return _build_findings_first_packet_impl(
+        user_input,
+        judge_speaker_packet,
+        format_findings_first_delivery=_format_findings_first_delivery,
+    )
+
+
+def _build_warroom_answer_seed_packet(state: AnimaState):
+    return _build_warroom_answer_seed_packet_impl(
+        state,
+        looks_like_generic_non_answer_text=_looks_like_generic_non_answer_text,
+    )
+
+
+def _build_grounded_source_findings_packet(raw_read_report: dict, analysis_data: dict, user_input: str):
+    return _build_grounded_source_findings_packet_impl(
+        raw_read_report,
+        analysis_data,
+        user_input,
+        analysis_has_answer_relevant_evidence=_analysis_has_answer_relevant_evidence,
+        grounded_findings_from_analysis=_grounded_findings_from_analysis,
+        compact_user_facing_summary=_compact_user_facing_summary,
+    )
+
+
+def _build_phase3_lane_delivery_packet(state: AnimaState, judge_speaker_packet: dict):
+    return _build_phase3_lane_delivery_packet_impl(
+        state,
+        judge_speaker_packet,
+        operation_plan_from_state=_operation_plan_from_state,
+        build_recent_dialogue_brief=_build_recent_dialogue_brief,
+        build_field_memo_user_brief=_build_field_memo_user_brief,
+        build_warroom_answer_seed_packet=_build_warroom_answer_seed_packet,
+        strategy_needs_post_read_synthesis=_strategy_needs_post_read_synthesis,
+        build_findings_first_packet=_build_findings_first_packet,
+        analysis_has_grounded_artifact_evidence=_analysis_has_grounded_artifact_evidence,
+        build_grounded_source_findings_packet=_build_grounded_source_findings_packet,
+    )
+
+
+def _phase3_payload_accepted_facts_from_packet(packet: dict):
+    return _phase3_payload_accepted_facts_from_packet_impl(
+        packet,
+        compact_user_facing_summary=_compact_user_facing_summary,
+    )
+
+
+def _clean_failure_missing_items(raw_slots: list[str] | None):
+    return _clean_failure_missing_items_impl(raw_slots)
+
+
+def _build_clean_failure_packet(
+    state: AnimaState,
+    analysis_data: dict,
+    raw_read_report: dict,
+    operation_plan: dict,
+    user_goal: str,
+    missing_slots: list[str] | None = None,
+    rejected_sources: list[dict] | None = None,
+):
+    return _build_clean_failure_packet_impl(
+        state,
+        analysis_data,
+        raw_read_report,
+        operation_plan,
+        user_goal,
+        missing_slots=missing_slots,
+        rejected_sources=rejected_sources,
+        analysis_has_answer_relevant_evidence=_analysis_has_answer_relevant_evidence,
+        analysis_reports_relevance_gap=_analysis_reports_relevance_gap,
+        compact_user_facing_summary=_compact_user_facing_summary,
+        normalize_short_string_list=_normalize_short_string_list,
+        grounded_findings_from_analysis=_grounded_findings_from_analysis,
+    )
+
+
+def _build_phase3_delivery_payload(
+    state: AnimaState,
+    judge_speaker_packet: dict,
+    phase3_delivery_packet: dict,
+):
+    return _build_phase3_delivery_payload_impl(
+        state,
+        judge_speaker_packet,
+        phase3_delivery_packet,
+        operation_plan_from_state=_operation_plan_from_state,
+        normalize_goal_lock=_normalize_goal_lock,
+        compact_user_facing_summary=_compact_user_facing_summary,
+        derive_user_goal_contract=_derive_user_goal_contract,
+        answer_mode_policy_for_turn=_answer_mode_policy_for_turn,
+        extract_current_turn_grounding_facts=_extract_current_turn_grounding_facts,
+        contract_satisfied_by_facts=_contract_satisfied_by_facts,
+        turn_allows_parametric_knowledge_blend=_turn_allows_parametric_knowledge_blend,
+        field_memo_packet_ready_for_delivery=_field_memo_packet_ready_for_delivery,
+        has_meaningful_delivery_seed=_has_meaningful_delivery_seed,
+        build_clean_failure_packet=_build_clean_failure_packet,
+    )
+
+
+def _verbalize_field_memo_delivery_seed(delivery_payload: dict):
+    return _verbalize_field_memo_delivery_seed_impl(
+        delivery_payload,
+        compact_user_facing_summary=_compact_user_facing_summary,
+    )
+
+
+def _verbalize_grounded_delivery_seed(delivery_payload: dict):
+    return _verbalize_grounded_delivery_seed_impl(
+        delivery_payload,
+        compact_user_facing_summary=_compact_user_facing_summary,
+    )
+
+
+def _build_phase3_speaker_judge_contract(
+    state: AnimaState,
+    delivery_payload: dict,
+    phase3_recent_context: str = "",
+    delivery_freedom_mode: str = "",
+    grounded_mode: bool = False,
+    supervisor_memo: str = "",
+):
+    return _build_phase3_speaker_judge_contract_impl(
+        state,
+        delivery_payload,
+        phase3_recent_context=phase3_recent_context,
+        delivery_freedom_mode=delivery_freedom_mode,
+        grounded_mode=grounded_mode,
+        supervisor_memo=supervisor_memo,
+        compact_user_facing_summary=_compact_user_facing_summary,
+    )
+
+
+def _phase3_delivery_payload_for_gate(
+    state: AnimaState,
+    strategist_output: dict,
+    analysis_data: dict,
+):
+    return _phase3_delivery_payload_for_gate_impl(
+        state,
+        strategist_output,
+        analysis_data,
+        phase3_reference_policy=_phase3_reference_policy,
+        build_judge_speaker_packet=_build_judge_speaker_packet,
+        build_phase3_lane_delivery_packet=_build_phase3_lane_delivery_packet,
+        build_phase3_delivery_payload=_build_phase3_delivery_payload,
+    )
+
+
+def _phase3_delivery_payload_ready_for_gate(
+    state: AnimaState,
+    strategist_output: dict,
+    analysis_data: dict,
+):
+    return _phase3_delivery_payload_ready_for_gate_impl(
+        state,
+        strategist_output,
+        analysis_data,
+        phase3_delivery_payload_for_gate=_phase3_delivery_payload_for_gate,
+    )
+
+
+def _format_recent_dialogue_self_critique(phase3_delivery_packet: dict):
+    packet = phase3_delivery_packet if isinstance(phase3_delivery_packet, dict) else {}
+    recent = packet.get("recent_dialogue_brief", {})
+    if not isinstance(recent, dict):
+        return ""
+    turns = recent.get("recent_turns", [])
+    if not isinstance(turns, list) or len(turns) < 2:
+        return ""
+
+    assistant_turns = [
+        str(turn.get("content") or "").strip()
+        for turn in turns
+        if isinstance(turn, dict) and str(turn.get("role") or "").strip().lower() == "assistant" and str(turn.get("content") or "").strip()
+    ]
+    user_turns = [
+        str(turn.get("content") or "").strip()
+        for turn in turns
+        if isinstance(turn, dict) and str(turn.get("role") or "").strip().lower() == "user" and str(turn.get("content") or "").strip()
+    ]
+    repeated_assistant = False
+    if len(assistant_turns) >= 2:
+        compact = [re.sub(r"\s+", "", item) for item in assistant_turns[-3:]]
+        repeated_assistant = len(set(compact)) < len(compact)
+    short_acceptance_seen = any(
+        re.sub(r"[\s!~.]+", "", unicodedata.normalize("NFKC", item).lower())
+        in {"ok", "yes", "y", "\u110b\u110b", "\u1100\u1100", "\uc88b\uc544", "\uadf8\ub798", "\ud574\uc918", "\uc9c4\ud589"}
+        for item in user_turns[-4:]
+    )
+
+    lines = ["Recent dialogue suggests the assistant missed the intended continuation."]
+    if repeated_assistant or short_acceptance_seen:
+        lines.append(
+            "The user likely accepted or requested execution of the previous offer, but the assistant treated it as a new clarification."
+        )
+    else:
+        lines.append(
+            "The assistant did not separate recent context from the required final action clearly enough."
+        )
+    if assistant_turns:
+        lines.append(f"Last assistant reply was '{_compact_user_facing_summary(assistant_turns[-1], 140)}'; check for repetition before answering.")
+    lines.append(
+        "Structurally, recent-dialogue review was over-weighted while the actual output act was not preserved."
+    )
+    lines.append(
+        "Repair instruction: do not copy the recent-dialogue brief; admit the miss, state why, and answer the current correction."
+    )
+    return "\n".join(lines).strip()
+
+
 def _phase3_reference_policy_packet(policy: dict):
     if not isinstance(policy, dict) or not policy:
         return "No phase_3 reference policy is available."
@@ -903,67 +1486,604 @@ def _phase3_reference_policy_packet(policy: dict):
     except TypeError:
         return str(packet)
 
-def _strategy_packet_for_prompt(strategy_data: dict):
-    if not strategy_data:
-        return "No -1a strategy packet is available."
-    packet = {
-        "reply_mode": strategy_data.get("reply_mode", ""),
-        "answer_goal": strategy_data.get("answer_goal", ""),
-        "tone_strategy": strategy_data.get("tone_strategy", ""),
-        "evidence_brief": strategy_data.get("evidence_brief", ""),
-        "reasoning_brief": strategy_data.get("reasoning_brief", ""),
-        "direct_answer_seed": strategy_data.get("direct_answer_seed", ""),
-        "must_include_facts": strategy_data.get("must_include_facts", []),
-        "must_avoid_claims": strategy_data.get("must_avoid_claims", []),
-        "answer_outline": strategy_data.get("answer_outline", []),
-        "uncertainty_policy": strategy_data.get("uncertainty_policy", ""),
-    }
-    try:
-        return json.dumps(packet, ensure_ascii=False, indent=2)
-    except TypeError:
-        return str(packet)
 
 
-def _empty_action_plan():
-    return {
-        "current_step_goal": "",
-        "required_tool": "",
-        "next_steps_forecast": [],
-    }
+def _normalize_delivery_freedom_mode(mode: str, reply_mode: str = ""):
+    normalized_mode = str(mode or "").strip()
+    if normalized_mode == "answer_not_ready":
+        return "clean_failure"
+    if normalized_mode in {"grounded", "supportive_free", "proposal", "identity_direct", "clean_failure"}:
+        return normalized_mode
+
+    normalized_reply_mode = str(reply_mode or "").strip()
+    if normalized_reply_mode in {"continue_previous_offer", "ask_user_question_now"}:
+        return "proposal"
+    if normalized_reply_mode == "casual_reaction":
+        return "supportive_free"
+    if normalized_reply_mode == "cautious_minimal":
+        return "clean_failure"
+    return "grounded"
 
 
-def _normalize_action_plan(action_plan: dict | None):
-    base = _empty_action_plan()
-    if not isinstance(action_plan, dict):
-        return base
-    base["current_step_goal"] = str(action_plan.get("current_step_goal") or "").strip()
-    base["required_tool"] = str(action_plan.get("required_tool") or "").strip()
-    next_steps = action_plan.get("next_steps_forecast", [])
-    if isinstance(next_steps, list):
-        base["next_steps_forecast"] = _dedupe_keep_order([str(step).strip() for step in next_steps if str(step).strip()])[:3]
-    return base
+def _grounded_findings_from_analysis(analysis_data: dict | None, limit: int = 3):
+    if not isinstance(analysis_data, dict):
+        return []
+    facts = []
+    evidences = analysis_data.get("evidences", [])
+    if isinstance(evidences, list):
+        for item in evidences:
+            if not isinstance(item, dict):
+                continue
+            fact = str(item.get("extracted_fact") or "").strip()
+            if fact:
+                facts.append(fact)
+    if not facts:
+        source_judgments = analysis_data.get("source_judgments", [])
+        if isinstance(source_judgments, list):
+            for judgment in source_judgments:
+                if not isinstance(judgment, dict):
+                    continue
+                for fact in judgment.get("accepted_facts", []):
+                    normalized = str(fact or "").strip()
+                    if normalized:
+                        facts.append(normalized)
+    return _normalize_short_string_list(facts, limit=limit)
 
 
-def _strategist_output_packet_for_prompt(strategist_output: dict):
-    if not strategist_output:
-        return "No -1a strategist output is available."
+def _analysis_reports_relevance_gap(analysis_data: dict | None):
+    if not isinstance(analysis_data, dict):
+        return False
+    text_parts = [
+        str(analysis_data.get("situational_brief") or ""),
+        str(analysis_data.get("analytical_thought") or ""),
+    ]
+    for judgment in analysis_data.get("source_judgments", []) or []:
+        if not isinstance(judgment, dict):
+            continue
+        text_parts.append(str(judgment.get("objection_reason") or ""))
+        text_parts.extend(str(item or "") for item in judgment.get("missing_info", []) or [])
+    normalized = unicodedata.normalize("NFKC", " ".join(text_parts)).lower()
+    gap_markers = [
+        "\uc9c1\uc811\uc801\uc778 \ub2f5\ubcc0\uc744 \uc81c\uacf5\ud558\uc9c0",
+        "\uc9c1\uc811\uc801\uc778 \ub2f5\ubcc0\uc744 \uc8fc\uc9c0",
+        "\uad00\ub828 \ub0b4\uc6a9\uc5d0 \ub300\ud55c \uc9c1\uc811\uc801\uc778",
+        "\uad00\ub828 \ub0b4\uc6a9\uc774 \uc5c6",
+        "\uad00\ub828\uc774 \uc5c6",
+        "\ubb34\uad00",
+        "\ucd94\uac00\uc801\uc778 \uc815\ubcf4\uac00 \ud544\uc694",
+        "\ucd94\uac00 \uc815\ubcf4\uac00 \ud544\uc694",
+        "\uad6c\uccb4\uc801\uc778 \uc815\ubcf4\ub294 \uc5c6",
+        "\uad6c\uccb4\uc801\uc778 \ub2f5\ubcc0\uc740 \uc5c6",
+        "\ucc3e\uc744 \uc218 \uc5c6",
+        "\ud30c\uc545\ub418\uc9c0 \uc54a",
+        "\ud655\uc778\ub418\uc9c0 \uc54a",
+        "does not provide a direct answer",
+        "not directly answer",
+        "not relevant",
+        "unrelated",
+        "insufficient",
+    ]
+    return any(marker in normalized for marker in gap_markers)
 
+
+def _analysis_has_answer_relevant_evidence(analysis_data: dict | None):
+    if not isinstance(analysis_data, dict) or not analysis_data:
+        return False
+    usable_field_memo_facts = [
+        str(fact).strip()
+        for fact in analysis_data.get("usable_field_memo_facts", []) or []
+        if str(fact).strip()
+    ]
+    if (
+        bool(analysis_data.get("can_answer_user_goal"))
+        and usable_field_memo_facts
+        and str(analysis_data.get("contract_status") or "satisfied").strip() in {"", "satisfied"}
+        and not analysis_data.get("missing_slots")
+    ):
+        return True
+    status = str(analysis_data.get("investigation_status") or "").upper()
+    if status != "COMPLETED":
+        return False
+    if _analysis_reports_relevance_gap(analysis_data):
+        return False
+
+    judgments = analysis_data.get("source_judgments", [])
+    if isinstance(judgments, list) and judgments:
+        for judgment in judgments:
+            if not isinstance(judgment, dict):
+                continue
+            source_status = str(judgment.get("source_status") or "").strip().lower()
+            accepted = [
+                str(item or "").strip()
+                for item in judgment.get("accepted_facts", []) or []
+                if str(item or "").strip()
+            ]
+            if source_status == "pass" and accepted:
+                return True
+        if any(isinstance(judgment, dict) and str(judgment.get("search_needed") or "").lower() == "true" for judgment in judgments):
+            return False
+
+    return bool(_grounded_findings_from_analysis(analysis_data))
+
+
+def _derive_goal_lock(user_input: str, start_gate_review: dict | None = None):
+    return _derive_goal_lock_v2(user_input, start_gate_review)
+
+
+def _derive_goal_lock_v2(user_input: str, start_gate_review: dict | None = None):
+    text = str(user_input or "").strip()
+    start_gate_review = start_gate_review if isinstance(start_gate_review, dict) else {}
+    answer_shape = "direct_answer"
+    must_not_expand_to = ["generic_nonanswer", "topic_drift"]
+    goal_contract = _derive_user_goal_contract(text, source_lane="direct_dialogue")
+    output_act = str(goal_contract.get("output_act") or "").strip()
+    if output_act == "answer_identity_slot":
+        answer_shape = "identity_short"
+    elif output_act == "answer_memory_recall":
+        answer_shape = "findings_first"
+        must_not_expand_to = ["generic_nonanswer", "ask_user_to_search_again", "topic_drift"]
+    elif str(start_gate_review.get("answerability") or "").strip() == "direct_now":
+        answer_shape = "direct_answer"
+
+    user_goal_core = _normalized_goal_from_contract(goal_contract, text)
+    if is_memory_state_disclosure_turn(text):
+        answer_shape = "memory_state_ack"
+        must_not_expand_to = ["memory_retrieval", "tool_search", "clean_failure", "topic_drift"]
+
+    return _normalize_goal_lock({
+        "user_goal_core": user_goal_core,
+        "answer_shape": answer_shape,
+        "must_not_expand_to": must_not_expand_to,
+    })
+
+
+def _normalized_goal_from_contract(goal_contract: dict | None, user_input: str = ""):
+    contract = goal_contract if isinstance(goal_contract, dict) else {}
+    text = str(user_input or "").strip()
+    slot = str(contract.get("slot_to_fill") or "").strip()
+    output_act = str(contract.get("output_act") or "").strip()
+
+    if is_memory_state_disclosure_turn(text):
+        return "Acknowledge the user's memory reset disclosure and orient to the new start."
+    if slot == "user.canonical_name":
+        return "Answer the user's canonical name from grounded identity evidence."
+    if slot == "memory.referent_fact":
+        return "Recover the concrete remembered situation or event being referenced."
+    if slot == "character.identity":
+        return "Identify the requested character directly."
+    if slot == "character.fictionality":
+        return "State whether the requested character is fictional or real."
+    if slot == "character.relationship":
+        return "Explain the requested relationship between the named characters or concepts."
+    if slot == "story.narrative_fact":
+        return "Answer the requested story or character fact directly."
+    if output_act == "answer_narrative_fact":
+        return "Answer the public story or character question directly without forcing private-memory retrieval."
+    if output_act == "self_analysis_snapshot":
+        return "Give a bounded conversation-based self-analysis snapshot."
+    if output_act == "diagnose_system":
+        return "Diagnose the reported system behavior and state the concrete fix."
+    return "Answer the current turn without broadening the goal."
+
+
+def _goal_locked_delivery_step_goal(goal_lock: dict | None):
+    normalized = _normalize_goal_lock(goal_lock if isinstance(goal_lock, dict) else {})
+    shape = normalized.get("answer_shape", "direct_answer")
+    if shape == "proposal_1_to_3":
+        return "Turn the grounded findings into 1-3 concrete things we can do today."
+    if shape == "fit_summary":
+        return "Summarize which grounded ANIMA capabilities fit the current plan right now."
+    if shape == "feature_summary":
+        return "Summarize the grounded capabilities first without drifting into unrequested expansion."
+    if shape == "identity_short":
+        return "Answer the identity question directly and briefly."
+    if shape == "capability_boundary":
+        return "Explain clearly what kind of analysis is possible right now, what remains limited, and what we can analyze immediately."
+    if shape == "self_analysis_snapshot":
+        return "Give a bounded conversation-based snapshot of what kind of person the user seems to be right now."
+    if shape == "findings_first":
+        return "Deliver the grounded findings first before opening any new search frontier."
+    if shape == "memory_state_ack":
+        return "Acknowledge the memory reset disclosure and orient naturally to the new start."
+    return "Prepare a direct answer from the current contract and available facts."
+
+
+def _goal_locked_gathering_step_goal(goal_lock: dict | None):
+    normalized = _normalize_goal_lock(goal_lock if isinstance(goal_lock, dict) else {})
+    shape = normalized.get("answer_shape", "direct_answer")
+    user_goal = str(normalized.get("user_goal_core") or "").strip()
+    if shape == "proposal_1_to_3":
+        return "Read one stronger grounded source so we can recommend 1-3 concrete things we can do today."
+    if shape == "fit_summary":
+        return "Read one stronger grounded source so we can summarize which capabilities fit the current goal."
+    if shape == "feature_summary":
+        return "Read one stronger grounded source so we can summarize the relevant capabilities directly."
+    if shape == "capability_boundary":
+        return "Read one stronger grounded source so we can explain the current analysis boundary and what kind of self-analysis is possible now."
+    if shape == "self_analysis_snapshot":
+        return "Review the recent dialogue and working memory so we can extract 2-4 grounded observations about the user's visible conversation patterns."
+    if shape == "findings_first":
+        return "Read one stronger grounded source so we can extract the findings that matter most to the current ask."
+    if shape == "memory_state_ack":
+        return "No source read is needed; acknowledge the memory reset disclosure and continue from the current turn."
+    if user_goal:
+        return "Decide whether one source read is needed for the strategist goal."
+    return "Plan the next evidence step only if the current contract requires it."
+
+
+def _tool_candidate_step_goal(goal_lock: dict | None, tool_candidate: dict | None):
+    tool_candidate = tool_candidate if isinstance(tool_candidate, dict) else {}
+    tool_name = str(tool_candidate.get("tool_name") or "").strip()
+    if not tool_name:
+        return _goal_locked_gathering_step_goal(goal_lock)
+    return f"Execute the selected {tool_name} call once, then let phase 2b judge whether it satisfies the strategist goal."
+
+
+def _goal_locked_delivery_strategy(
+    response_strategy: dict,
+    analysis_data: dict,
+    user_input: str,
+    goal_lock: dict | None = None,
+    facts: list | None = None,
+):
+    normalized = json.loads(json.dumps(response_strategy if isinstance(response_strategy, dict) else {}, ensure_ascii=False))
+    grounded_facts = _normalize_short_string_list(facts if isinstance(facts, list) else _grounded_findings_from_analysis(analysis_data), limit=3)
+    if not grounded_facts:
+        return normalized
+
+    goal_lock = _normalize_goal_lock(goal_lock if isinstance(goal_lock, dict) else _derive_goal_lock_v2(user_input, {}))
+    answer_shape = goal_lock.get("answer_shape", "direct_answer")
+    normalized["reply_mode"] = "grounded_answer"
+    normalized["evidence_brief"] = " / ".join(grounded_facts)
+    normalized["reasoning_brief"] = "Keep the answer anchored to the grounded findings and stay inside the user goal."
+    normalized["must_include_facts"] = grounded_facts
+
+    if answer_shape == "proposal_1_to_3":
+        normalized["delivery_freedom_mode"] = "proposal"
+        normalized["answer_goal"] = "Use the grounded findings to propose 1-3 concrete things we can do today."
+        normalized["direct_answer_seed"] = "Based on the grounded material, here are the concrete things we can do today."
+        normalized["answer_outline"] = [
+            "Summarize the grounded capability fit first.",
+            "Propose 1-3 concrete next actions for today.",
+            "Add only one narrow follow-up if it truly helps.",
+        ]
+    elif answer_shape == "capability_boundary":
+        normalized["delivery_freedom_mode"] = "grounded"
+        normalized["answer_goal"] = "Explain clearly what kind of self-analysis is possible now, what remains limited, and what we can do immediately."
+        normalized["direct_answer_seed"] = "With the current evidence, I can give a bounded pattern read, not a deep diagnosis."
+        normalized["answer_outline"] = [
+            "State the possible analysis boundary first.",
+            "Name the current limitations without exaggerating.",
+            "Suggest one or two immediately useful next analysis steps.",
+        ]
+    elif answer_shape == "self_analysis_snapshot":
+        normalized["delivery_freedom_mode"] = "grounded"
+        normalized["answer_goal"] = "Give a bounded, conversation-based snapshot of the user's visible patterns right now."
+        normalized["direct_answer_seed"] = "From this conversation alone, a few patterns are visible."
+        normalized["answer_outline"] = [
+            "Start by saying this is a conversation-based read, not a deep diagnosis.",
+            "Name 2-4 grounded patterns visible in the dialogue.",
+            "Close with one short note about what would make the read deeper or more reliable.",
+        ]
+    elif answer_shape in {"fit_summary", "feature_summary"}:
+        normalized["delivery_freedom_mode"] = "grounded"
+        normalized["answer_goal"] = "Summarize which grounded capabilities fit the current user goal."
+        normalized["direct_answer_seed"] = "Based on the grounded material, the capabilities that fit this goal are:"
+        normalized["answer_outline"] = [
+            "Name the grounded capabilities first.",
+            "Explain briefly why they fit the user's stated goal.",
+            "Avoid drifting into unrelated ethics or research unless asked.",
+        ]
+    elif answer_shape == "identity_short":
+        normalized["delivery_freedom_mode"] = "grounded"
+        normalized["answer_goal"] = "Answer identity-related questions from approved context or grounded facts."
+        normalized["direct_answer_seed"] = ""
+    else:
+        normalized["delivery_freedom_mode"] = "grounded"
+        normalized["answer_goal"] = "Deliver the grounded findings directly."
+        normalized["direct_answer_seed"] = ""
+        normalized["answer_outline"] = [
+            "State the grounded findings first.",
+            "Keep the answer inside the user's actual ask.",
+        ]
+
+    must_avoid = normalized.get("must_avoid_claims", [])
+    if not isinstance(must_avoid, list):
+        must_avoid = []
+    must_avoid.extend(goal_lock.get("must_not_expand_to", []))
+    normalized["must_avoid_claims"] = _normalize_short_string_list(must_avoid, limit=8)
+    return normalized
+
+
+def _goal_lock_requires_converged_delivery(
+    goal_lock: dict | None,
+    analysis_data: dict,
+    grounded_facts: list | None = None,
+):
+    normalized = _normalize_goal_lock(goal_lock if isinstance(goal_lock, dict) else {})
+    answer_shape = str(normalized.get("answer_shape") or "").strip()
+    status = str((analysis_data or {}).get("investigation_status") or "").upper()
+    facts = _normalize_short_string_list(
+        grounded_facts if isinstance(grounded_facts, list) else _grounded_findings_from_analysis(analysis_data),
+        limit=3,
+    )
+    if status != "COMPLETED" or not facts:
+        return False
+    return answer_shape in {"proposal_1_to_3", "fit_summary", "feature_summary", "findings_first", "capability_boundary", "self_analysis_snapshot"}
+
+
+def _goal_lock_prefers_delivery_on_completed_findings(goal_lock: dict | None):
+    normalized = _normalize_goal_lock(goal_lock if isinstance(goal_lock, dict) else {})
+    answer_shape = str(normalized.get("answer_shape") or "").strip()
+    return answer_shape in {"proposal_1_to_3", "fit_summary", "feature_summary", "findings_first", "capability_boundary", "self_analysis_snapshot"}
+
+
+def _strategy_needs_post_read_synthesis(strategist_output: dict | None, analysis_data: dict | None):
+    strategist_output = strategist_output if isinstance(strategist_output, dict) else {}
+    analysis_data = analysis_data if isinstance(analysis_data, dict) else {}
+    if str(analysis_data.get("investigation_status") or "").upper() != "COMPLETED":
+        return False
+    operation_plan = strategist_output.get("operation_plan", {})
+    if not isinstance(operation_plan, dict):
+        operation_plan = {}
+    output_act = str(operation_plan.get("output_act") or "").strip()
+    if output_act in {"deliver_findings", "summarize"}:
+        return False
+    goal_lock = _normalize_goal_lock(strategist_output.get("goal_lock", {}))
+    shape = str(goal_lock.get("answer_shape") or "").strip()
+    return shape in {"self_analysis_snapshot", "fit_summary", "feature_summary", "capability_boundary"}
+
+
+def _strategy_synthesis_is_satisfied(strategist_output: dict | None, analysis_data: dict | None):
+    if not _strategy_needs_post_read_synthesis(strategist_output, analysis_data):
+        return True
+    strategist_output = strategist_output if isinstance(strategist_output, dict) else {}
+    goal_lock = _normalize_goal_lock(strategist_output.get("goal_lock", {}))
     response_strategy = strategist_output.get("response_strategy", {})
     if not isinstance(response_strategy, dict):
         response_strategy = {}
+    user_goal = str(goal_lock.get("user_goal_core") or "").strip()
+    if not _has_usable_response_seed(response_strategy, user_goal):
+        return False
 
+    seed = " ".join([
+        str(response_strategy.get("direct_answer_seed") or ""),
+        str(response_strategy.get("reasoning_brief") or ""),
+        str(response_strategy.get("evidence_brief") or ""),
+    ])
+    normalized_seed = unicodedata.normalize("NFKC", seed).lower()
+    clean_satisfied_markers = [
+        "\uadf8\ub798\uc11c",
+        "\ubc14\ud0d5\uc73c\ub85c",
+        "\uae30\ubc18\uc73c\ub85c",
+        "\uc758\ubbf8",
+        "\ud574\uc11d",
+        "\uc0dd\uac01",
+        "\uc774\ud574",
+        "\uc815\uccb4\uc131",
+        "\uc1a1\ub828",
+        "\uc544\ub2c8\ub9c8",
+        "\ud504\ub85c\ud1a0\ud0c0\uc785",
+        "anima",
+        "agent",
+        "prototype",
+    ]
+    if any(marker in normalized_seed for marker in clean_satisfied_markers):
+        return True
+    synthesis_markers = ["based on", "meaning", "interpret", "think", "identity", "anima", "agent"]
+    return any(marker in normalized_seed for marker in synthesis_markers)
+
+
+def _lens_candidates_from_goal_lock(goal_lock: dict | None):
+    normalized = _normalize_goal_lock(goal_lock if isinstance(goal_lock, dict) else {})
+    answer_shape = str(normalized.get("answer_shape") or "").strip()
+    if answer_shape == "proposal_1_to_3":
+        return ["today_actions", "grounded_capability_fit", "avoid_social_impact_expansion"]
+    if answer_shape == "capability_boundary":
+        return ["capability_boundary", "what_is_possible_now", "avoid_generic_limit_template"]
+    if answer_shape == "self_analysis_snapshot":
+        return ["user_pattern_snapshot", "conversation_visible_traits_only", "avoid_deep_psych_diagnosis"]
+    if answer_shape == "fit_summary":
+        return ["current_plan_fit", "grounded_capabilities_only", "avoid_ethics_expansion"]
+    if answer_shape == "feature_summary":
+        return ["feature_summary", "grounded_capabilities_only", "avoid_social_impact_expansion"]
+    if answer_shape == "findings_first":
+        return ["grounded_findings_first", "avoid_new_search_without_need"]
+    return ["direct_user_goal", "grounded_scope_only"]
+
+
+def _build_critic_lens_packet(
+    strategist_output: dict | None,
+    analysis_data: dict | None = None,
+    objection_packet: dict | None = None,
+):
+    strategist_output = strategist_output if isinstance(strategist_output, dict) else {}
+    analysis_data = analysis_data if isinstance(analysis_data, dict) else {}
+    objection_packet = objection_packet if isinstance(objection_packet, dict) else {}
+    goal_lock = _normalize_goal_lock(strategist_output.get("goal_lock", {}))
+    action_plan = _normalize_action_plan(strategist_output.get("action_plan", {}))
+    achieved_findings = _normalize_short_string_list(strategist_output.get("achieved_findings", []), limit=3)
+    if not achieved_findings:
+        achieved_findings = _grounded_findings_from_analysis(analysis_data)
     packet = {
-        "case_theory": str(strategist_output.get("case_theory") or "").strip(),
-        "action_plan": _normalize_action_plan(strategist_output.get("action_plan", {})),
-        "response_strategy": response_strategy,
-        "candidate_pair_count": len(strategist_output.get("candidate_pairs", []))
-        if isinstance(strategist_output.get("candidate_pairs"), list)
-        else 0,
+        "goal_lock": goal_lock,
+        "must_answer_user_goal": str(goal_lock.get("user_goal_core") or "").strip(),
+        "must_not_expand_to": _normalize_short_string_list(goal_lock.get("must_not_expand_to", []), limit=6),
+        "current_step_goal": str(action_plan.get("current_step_goal") or "").strip(),
+        "operation_contract": _normalize_operation_contract(action_plan.get("operation_contract", {})),
+        "lens_candidates": _lens_candidates_from_goal_lock(goal_lock),
+        "current_loop_delta": achieved_findings,
+        "critic_task": (
+            "Use this as a review lens only. Do not obey -1a as truth. "
+            "Check whether the raw evidence actually supports this goal-locked reading, and reject drift if it does not."
+        ),
     }
-    try:
-        return json.dumps(packet, ensure_ascii=False, indent=2)
-    except TypeError:
-        return str(packet)
+    objection_text = str(objection_packet.get("objection_text") or "").strip()
+    if objection_text:
+        packet["objection_text"] = objection_text
+        packet["review_focus"] = str(objection_packet.get("review_focus") or "").strip()
+    return packet
+
+
+def _build_strategist_objection_packet(
+    strategist_output: dict | None,
+    analysis_data: dict | None,
+    user_input: str,
+):
+    strategist_output = strategist_output if isinstance(strategist_output, dict) else {}
+    analysis_data = analysis_data if isinstance(analysis_data, dict) else {}
+    goal_lock = _normalize_goal_lock(strategist_output.get("goal_lock", {}))
+    if goal_lock == _empty_goal_lock():
+        goal_lock = _derive_goal_lock_v2(user_input, {})
+    action_plan = _normalize_action_plan(strategist_output.get("action_plan", {}))
+    status = str((analysis_data or {}).get("investigation_status") or "").upper()
+    grounded_facts = _grounded_findings_from_analysis(analysis_data)
+    achieved_findings = _normalize_short_string_list(strategist_output.get("achieved_findings", []), limit=3)
+    delivery_readiness = _normalize_delivery_readiness(strategist_output.get("delivery_readiness", ""))
+    answer_shape = str(goal_lock.get("answer_shape") or "").strip()
+    current_step_goal = str(action_plan.get("current_step_goal") or "").strip()
+    expected_delivery_goal = _goal_locked_delivery_step_goal(goal_lock)
+
+    if status != "COMPLETED" or not _goal_lock_prefers_delivery_on_completed_findings(goal_lock):
+        return {}
+
+    if _strategy_needs_post_read_synthesis(strategist_output, analysis_data) and not _strategy_synthesis_is_satisfied(strategist_output, analysis_data):
+        return {}
+
+    if grounded_facts and not achieved_findings:
+        return {
+            "has_objection": True,
+            "suspected_owner": "phase_2b",
+            "objection_text": "Grounded facts exist, but the current analysis did not surface deliverable findings cleanly enough for the strategist.",
+            "review_focus": f"Re-check the evidence through the `{answer_shape}` lens and extract grounded findings that answer the user goal directly.",
+        }
+
+    if achieved_findings and (delivery_readiness != "deliver_now" or action_plan.get("required_tool")):
+        return {
+            "has_objection": True,
+            "suspected_owner": "-1a",
+            "objection_text": "The strategist kept planning even though grounded findings already support a goal-locked delivery.",
+            "review_focus": f"Stop expansion and deliver using the `{answer_shape}` shape now.",
+        }
+
+    if achieved_findings and current_step_goal and current_step_goal != expected_delivery_goal:
+        return {
+            "has_objection": True,
+            "suspected_owner": "-1a",
+            "objection_text": "The current strategist step goal drifted away from the user goal after grounded findings were already available.",
+            "review_focus": f"Replace the drifted step goal with a `{answer_shape}` delivery goal.",
+        }
+
+    return {}
+
+
+def _ensure_strategist_continuity_fields(
+    strategist_payload: dict,
+    user_input: str,
+    analysis_data: dict,
+    start_gate_review: dict | None = None,
+):
+    if not isinstance(strategist_payload, dict):
+        strategist_payload = {}
+    normalized = json.loads(json.dumps(strategist_payload, ensure_ascii=False))
+    action_plan = _normalize_action_plan(normalized.get("action_plan", {}))
+    response_strategy = normalized.get("response_strategy", {})
+    if not isinstance(response_strategy, dict):
+        response_strategy = {}
+
+    goal_lock = _normalize_goal_lock(normalized.get("goal_lock", {}))
+    if goal_lock == _empty_goal_lock():
+        goal_lock = _derive_goal_lock_v2(user_input, start_gate_review)
+
+    grounded_facts = _grounded_findings_from_analysis(analysis_data)
+    achieved_findings = _normalize_short_string_list(normalized.get("achieved_findings", []), limit=3)
+    if not achieved_findings:
+        achieved_findings = grounded_facts
+    needs_post_read_synthesis = _strategy_needs_post_read_synthesis(normalized, analysis_data)
+    synthesis_satisfied = _strategy_synthesis_is_satisfied(normalized, analysis_data)
+
+    status = str((analysis_data or {}).get("investigation_status") or "").upper()
+    convergence_state = _normalize_convergence_state(normalized.get("convergence_state", ""))
+    if normalized.get("convergence_state") in {None, ""}:
+        if _has_meaningful_strategy(response_strategy) or (status == "COMPLETED" and achieved_findings and not needs_post_read_synthesis):
+            convergence_state = "deliverable"
+        elif achieved_findings:
+            convergence_state = "synthesizing"
+        elif status in {"INCOMPLETE", "EXPANSION_REQUIRED"}:
+            convergence_state = "gathering"
+
+    delivery_readiness = _normalize_delivery_readiness(normalized.get("delivery_readiness", ""))
+    if normalized.get("delivery_readiness") in {None, ""}:
+        if _has_meaningful_strategy(response_strategy) or (status == "COMPLETED" and achieved_findings and not needs_post_read_synthesis):
+            delivery_readiness = "deliver_now"
+        elif action_plan.get("required_tool"):
+            delivery_readiness = "need_one_more_source"
+        elif action_plan.get("operation_contract", {}).get("operation_kind") == "read_same_source_deeper":
+            delivery_readiness = "need_targeted_deeper_read"
+        else:
+            delivery_readiness = "need_reframe"
+
+    next_frontier = _normalize_short_string_list(normalized.get("next_frontier", []), limit=3)
+    if not next_frontier:
+        next_frontier = _normalize_short_string_list(action_plan.get("next_steps_forecast", []), limit=3)
+
+    force_goal_locked_delivery = _goal_lock_requires_converged_delivery(
+        goal_lock,
+        analysis_data,
+        grounded_facts,
+    ) and not needs_post_read_synthesis
+    if force_goal_locked_delivery:
+        convergence_state = "deliverable"
+        delivery_readiness = "deliver_now"
+        achieved_findings = grounded_facts or achieved_findings
+        action_plan["required_tool"] = ""
+        action_plan["current_step_goal"] = _goal_locked_delivery_step_goal(goal_lock)
+        action_plan["next_steps_forecast"] = []
+        next_frontier = []
+        response_strategy = _goal_locked_delivery_strategy(
+            response_strategy if isinstance(response_strategy, dict) else {},
+            analysis_data,
+            user_input,
+            goal_lock=goal_lock,
+            facts=achieved_findings,
+        )
+
+    if needs_post_read_synthesis and not synthesis_satisfied:
+        convergence_state = "synthesizing"
+        delivery_readiness = "need_reframe"
+        action_plan["required_tool"] = ""
+        if (
+            not action_plan.get("current_step_goal")
+            or action_plan.get("current_step_goal") == _goal_locked_delivery_step_goal(goal_lock)
+        ):
+            action_plan["current_step_goal"] = "Use the completed source read as material for synthesis/reflection before final delivery."
+        if not next_frontier:
+            next_frontier = [
+                "Run WarRoom or rebuild the delivery contract so the answer interprets the read source against the user's actual goal.",
+                "Separate source-reading completion from strategy satisfaction before phase_3.",
+            ]
+
+    if delivery_readiness == "deliver_now":
+        action_plan["required_tool"] = ""
+        if force_goal_locked_delivery or not action_plan.get("current_step_goal") or action_plan.get("current_step_goal", "").strip().lower().startswith("deliver the final answer"):
+            action_plan["current_step_goal"] = _goal_locked_delivery_step_goal(goal_lock)
+        response_strategy = _goal_locked_delivery_strategy(
+            response_strategy if _has_meaningful_strategy(response_strategy) else _fallback_response_strategy(analysis_data),
+            analysis_data,
+            user_input,
+            goal_lock=goal_lock,
+            facts=achieved_findings,
+        )
+
+    normalized["goal_lock"] = goal_lock
+    normalized["convergence_state"] = convergence_state
+    normalized["achieved_findings"] = achieved_findings
+    normalized["delivery_readiness"] = delivery_readiness
+    normalized["next_frontier"] = next_frontier
+    normalized["action_plan"] = action_plan
+    normalized["response_strategy"] = response_strategy
+    return normalized
+
 
 def _dedupe_keep_order(items):
     seen = set()
@@ -987,37 +2107,6 @@ def _infer_fact_kind(source_type: str, fact_text: str):
         return "event"
     return "other"
 
-def _empty_critic_report():
-    return {
-        "situational_brief": "",
-        "analytical_thought": "",
-        "source_judgments": [],
-        "open_questions": [],
-        "objections": [],
-        "recommended_searches": [],
-        "recommended_action": "insufficient_evidence",
-    }
-
-def _empty_advocate_report():
-    return {
-        "defense_strategy": "",
-        "summary_of_position": "",
-        "supported_pair_ids": [],
-        "response_contract": {},
-    }
-
-def _empty_verdict_board():
-    return {
-        "answer_now": False,
-        "requires_search": False,
-        "approved_fact_ids": [],
-        "approved_pair_ids": [],
-        "rejected_pair_ids": [],
-        "held_pair_ids": [],
-        "judge_notes": [],
-        "final_answer_brief": "",
-    }
-
 def _analysis_status_to_recommended_action(status: str):
     normalized = str(status or "").upper()
     if normalized == "COMPLETED":
@@ -1040,7 +2129,14 @@ def _empty_reasoning_board(turn_id: str = "", user_input: str = ""):
         "direct_answer_seed": "",
         "strategist_plan": {
             "case_theory": "",
+            "operation_plan": _empty_operation_plan(),
             "action_plan": _empty_action_plan(),
+            "goal_lock": _empty_goal_lock(),
+            "convergence_state": "gathering",
+            "achieved_findings": [],
+            "delivery_readiness": "need_reframe",
+            "next_frontier": [],
+            "war_room_contract": _empty_war_room_operating_contract(),
         },
         "critic_report": _empty_critic_report(),
         "advocate_report": _empty_advocate_report(),
@@ -1048,233 +2144,196 @@ def _empty_reasoning_board(turn_id: str = "", user_input: str = ""):
     }
 
 
-def _empty_war_room_state():
-    return {
-        "freedom": {
-            "granted": False,
-            "granted_by": "",
-            "scope": "none",
-            "reason": "none",
-            "note": "No freedom is granted by default until a node explicitly earns it.",
-        },
-        "duty": {
-            "must_label_hypotheses": True,
-            "must_separate_fact_and_opinion": True,
-            "must_report_missing_info": True,
-            "must_not_upgrade_guess_to_fact": True,
-            "boundary_note": "Facts and opinions must stay separate at all times.",
-        },
-        "epistemic_debt": {
-            "debt_kind": [],
-            "missing_items": [],
-            "why_tool_not_used": "",
-            "next_best_action": "",
-        },
-        "agent_notes": [],
-    }
+def _is_warroom_deliberation_turn(user_input: str, recent_context: str = ""):
+    del recent_context
+    text = unicodedata.normalize("NFKC", str(user_input or "").strip()).lower()
+    if not text:
+        return False
+    if _extract_artifact_hint(text) or _extract_explicit_search_keyword(text):
+        return False
+    explicit_markers = ["warroom", "deliberate", "think deeply", "\uc219\uace0", "\ud1a0\ub860"]
+    return any(marker in text for marker in explicit_markers)
 
 
-def _normalize_war_room_state(war_room: dict | None):
-    base = _empty_war_room_state()
-    if not isinstance(war_room, dict):
-        return base
-    for section in ("freedom", "duty", "epistemic_debt"):
-        value = war_room.get(section)
-        if isinstance(value, dict):
-            base[section].update(value)
-    notes = war_room.get("agent_notes", [])
-    if isinstance(notes, list):
-        base["agent_notes"] = [note for note in notes if isinstance(note, dict)]
-    return base
+def _is_listening_note_turn(user_input: str, recent_context: str = "", working_memory: dict | None = None):
+    """The listening_note lane is retired.
+
+    Story/listening turns should now use normal direct delivery plus FieldMemo
+    persistence. Keeping this as a tiny false gate prevents old routing branches
+    from reactivating the brittle one-shot listening template.
+    """
+    return False
 
 
-def _war_room_missing_items_from_analysis(analysis_data: dict):
-    missing_items = []
-    if not isinstance(analysis_data, dict):
-        return missing_items
-
-    for item in analysis_data.get("evidences", []) if isinstance(analysis_data.get("evidences"), list) else []:
-        if not isinstance(item, dict):
-            continue
-        extracted_fact = str(item.get("extracted_fact") or "").strip()
-        if extracted_fact:
-            break
-
-    analytical_thought = str(analysis_data.get("analytical_thought") or "").strip()
-    if analytical_thought and str(analysis_data.get("investigation_status") or "").upper() in {"EXPANSION_REQUIRED", "INCOMPLETE"}:
-        missing_items.append(analytical_thought)
-
-    return _dedupe_keep_order([item for item in missing_items if item])[:4]
-
-def _upsert_war_room_agent_note(war_room: dict, note: dict):
-    war_room = _normalize_war_room_state(war_room)
-    agent_name = str((note or {}).get("agent_name") or "").strip()
-    if not agent_name:
-        return war_room
-    notes = [existing for existing in war_room.get("agent_notes", []) if str(existing.get("agent_name") or "").strip() != agent_name]
-    notes.append(note)
-    war_room["agent_notes"] = notes[-6:]
-    return war_room
+def _is_self_critique_output_request(user_input: str):
+    text = unicodedata.normalize("NFKC", str(user_input or "").strip()).lower()
+    if not text:
+        return False
+    markers = ["self critique", "self-critique", "criticize yourself", "\uc790\uae30\ube44\ud310", "\ube44\ud310", "\ubc18\uc131"]
+    return any(marker in text for marker in markers)
 
 
-def _war_room_from_critic(state: AnimaState, analysis_data: dict, raw_read_report: dict):
-    war_room = _normalize_war_room_state(state.get("war_room", {}))
-    status = str((analysis_data or {}).get("investigation_status") or "").upper()
-    internal_reasoning_only = str((raw_read_report or {}).get("read_mode") or "").strip() == "current_turn_only"
-    missing_items = _war_room_missing_items_from_analysis(analysis_data)
+def _derive_source_lane_from_plan(user_input: str, plan_type: str, requested_move: str = "", required_tool: str = ""):
+    del user_input, requested_move
+    tool_text = str(required_tool or "").strip()
+    if plan_type == "recent_dialogue_review":
+        return "recent_dialogue_review"
+    if "tool_scroll_chat_log" in tool_text:
+        return "scroll_source"
+    if "tool_read_artifact" in tool_text:
+        return "artifact_read"
+    if "tool_search_field_memos" in tool_text:
+        return "field_memo_review"
+    if "tool_search_memory" in tool_text:
+        return "memory_search"
+    if plan_type == "warroom_deliberation":
+        return "warroom"
+    return "none"
 
-    if internal_reasoning_only:
-        reason = "tool_would_not_help"
-        scope = "planning_only"
-        why_no_tool = "The current turn can be examined directly without external retrieval."
-    else:
-        reason = "none"
-        scope = "none"
-        why_no_tool = ""
 
-    debt_kind = []
-    if status in {"INCOMPLETE", "EXPANSION_REQUIRED"}:
-        debt_kind.append("evidence_gap")
-    if internal_reasoning_only:
-        debt_kind.append("tool_gap")
 
-    war_room["freedom"] = {
-        "granted": internal_reasoning_only,
-        "granted_by": "phase_2b",
-        "scope": scope,
-        "reason": reason,
-        "note": "phase_2b used no-tool reasoning only because the current turn itself was the main evidence source." if internal_reasoning_only else "phase_2b stayed grounded in retrieved or provided sources.",
-    }
-    war_room["epistemic_debt"] = {
-        "debt_kind": _dedupe_keep_order(debt_kind),
-        "missing_items": missing_items,
-        "why_tool_not_used": why_no_tool,
-        "next_best_action": "Answer now with current evidence." if status == "COMPLETED" else "Hand the diagnosed gap to -1a so the strategist can plan the next step.",
-    }
-    return _upsert_war_room_agent_note(war_room, {
-        "agent_name": "phase_2b",
-        "used_freedom": internal_reasoning_only,
-        "freedom_scope": scope,
-        "shortage_reason": str((analysis_data or {}).get("situational_brief") or "").strip() or "phase_2b identified remaining gaps before a confident answer.",
-        "missing_items": missing_items,
-        "why_no_tool": why_no_tool or "phase_2b relied on the current turn because no stronger external source was required yet.",
-        "allowed_output_boundary": "Only fact-grounded criticism and clearly labeled uncertainty are allowed.",
-    })
+def _derive_output_act_from_turn(
+    user_input: str,
+    plan_type: str,
+    requested_move: str = "",
+    response_strategy: dict | None = None,
+):
+    del user_input, requested_move
+    response_strategy = response_strategy if isinstance(response_strategy, dict) else {}
+    reply_mode = str(response_strategy.get("reply_mode") or "").strip()
+    if reply_mode == "ask_user_question_now":
+        return "ask_one_question"
+    if plan_type == "tool_evidence":
+        return "deliver_findings"
+    if plan_type == "recent_dialogue_review":
+        return "summarize"
+    if reply_mode == "continue_previous_offer":
+        return "answer"
+    return "answer"
 
-def _war_room_after_advocate(war_room: dict, analysis_data: dict, strategist_output: dict, reasoning_board: dict):
-    war_room = _normalize_war_room_state(war_room)
-    status = str((analysis_data or {}).get("investigation_status") or "").upper()
-    candidate_pairs = reasoning_board.get("candidate_pairs", []) if isinstance(reasoning_board, dict) else []
-    response_strategy = strategist_output.get("response_strategy", {}) if isinstance(strategist_output, dict) else {}
-    if not isinstance(response_strategy, dict):
-        response_strategy = {}
-    action_plan = _normalize_action_plan(strategist_output.get("action_plan", {})) if isinstance(strategist_output, dict) else _empty_action_plan()
-    case_theory = str((strategist_output or {}).get("case_theory") or "").strip() if isinstance(strategist_output, dict) else ""
-    used_freedom = bool(
-        candidate_pairs
-        or _has_meaningful_strategy(response_strategy)
-        or action_plan.get("current_step_goal")
-        or action_plan.get("required_tool")
-        or case_theory
+
+
+def _derive_operation_plan(
+    user_input: str,
+    analysis_data: dict | None,
+    action_plan: dict | None,
+    response_strategy: dict | None,
+    working_memory: dict | None = None,
+    recent_context: str = "",
+    start_gate_review: dict | None = None,
+):
+    analysis_data = analysis_data if isinstance(analysis_data, dict) else {}
+    action_plan = _normalize_action_plan(action_plan if isinstance(action_plan, dict) else {})
+    response_strategy = response_strategy if isinstance(response_strategy, dict) else {}
+    working_memory = working_memory if isinstance(working_memory, dict) else {}
+    start_gate_review = start_gate_review if isinstance(start_gate_review, dict) else {}
+
+    required_tool = str(action_plan.get("required_tool") or "").strip()
+    operation_contract = _normalize_operation_contract(action_plan.get("operation_contract", {}))
+    operation_kind = str(operation_contract.get("operation_kind") or "").strip()
+    reply_mode = str(response_strategy.get("reply_mode") or "").strip()
+    delivery_mode = _normalize_delivery_freedom_mode(
+        str(response_strategy.get("delivery_freedom_mode") or "").strip(),
+        reply_mode=reply_mode,
     )
-    scope = "bounded_speculation" if candidate_pairs else "planning_only"
-    missing_items = war_room.get("epistemic_debt", {}).get("missing_items", [])
 
-    war_room["freedom"] = {
-        "granted": used_freedom,
-        "granted_by": "-1a",
-        "scope": scope,
-        "reason": "evidence_gap" if status in {"INCOMPLETE", "EXPANSION_REQUIRED"} else "no_tool_needed",
-        "note": "-1a used limited reasoning freedom to assemble a defensible response plan from approved facts.",
-    }
-    war_room["duty"]["boundary_note"] = "Claims must stay anchored to facts, and guesses must remain labeled as guesses."
-    return _upsert_war_room_agent_note(war_room, {
-        "agent_name": "-1a",
-        "used_freedom": used_freedom,
-        "freedom_scope": scope,
-        "shortage_reason": case_theory or str((analysis_data or {}).get("analytical_thought") or "").strip() or "-1a had to shape a response under incomplete certainty.",
-        "missing_items": list(missing_items)[:4],
-        "why_no_tool": "When -1a skips tools, it must explain the epistemic gap and hand an explicit plan to -1b instead of improvising.",
-        "allowed_output_boundary": "Only defended, fact-anchored response planning is allowed here.",
-    })
+    del recent_context
 
-def _war_room_after_judge(war_room: dict, decision: dict, analysis_data: dict, reasoning_board: dict):
-    war_room = _normalize_war_room_state(war_room)
-    verdict = reasoning_board.get("verdict_board", {}) if isinstance(reasoning_board, dict) else {}
-    action = str((decision or {}).get("action") or "").strip()
-    status = str((analysis_data or {}).get("investigation_status") or "").upper()
-    requires_search = bool(verdict.get("requires_search")) if isinstance(verdict, dict) else False
-    answer_now = bool(verdict.get("answer_now")) if isinstance(verdict, dict) else False
-    judge_notes = verdict.get("judge_notes", []) if isinstance(verdict.get("judge_notes"), list) else []
-    missing_items = war_room.get("epistemic_debt", {}).get("missing_items", [])
-
-    if action == "call_tool":
-        freedom = {
-            "granted": False,
-            "granted_by": "-1b",
-            "scope": "none",
-            "reason": "evidence_gap",
-            "note": "The judge requires more evidence before allowing delivery.",
-        }
-    elif action == "plan_more":
-        freedom = {
-            "granted": True,
-            "granted_by": "-1b",
-            "scope": "planning_only",
-            "reason": "no_suitable_tool",
-            "note": "The judge allows another planning pass because the current tools do not fit the case cleanly.",
-        }
-    elif action == "answer_not_ready":
-        freedom = {
-            "granted": True,
-            "granted_by": "-1b",
-            "scope": "planning_only",
-            "reason": "no_suitable_tool" if requires_search else "evidence_gap",
-            "note": "The judge prefers transparent limits over pretending to be ready.",
-        }
+    if "tool_search_field_memos" in required_tool or "tool_search_memory" in required_tool or operation_kind == "search_new_source":
+        plan_type = "tool_evidence"
+    elif (
+        "tool_read_artifact" in required_tool
+        or "tool_scroll_chat_log" in required_tool
+        or "tool_read_full_diary" in required_tool
+        or operation_kind in {"read_same_source_deeper", "review_personal_history"}
+    ):
+        plan_type = "raw_source_analysis"
+    elif operation_kind == "deliver_now":
+        plan_type = "direct_delivery"
+    elif delivery_mode in {"supportive_free", "identity_direct"} or reply_mode in {"casual_reaction", "continue_previous_offer"}:
+        plan_type = "direct_delivery"
     else:
-        freedom = {
-            "granted": True,
-            "granted_by": "-1b",
-            "scope": "bounded_speculation" if status in {"INCOMPLETE", "EXPANSION_REQUIRED"} and not requires_search else "planning_only",
-            "reason": "evidence_gap" if status in {"INCOMPLETE", "EXPANSION_REQUIRED"} else "no_tool_needed",
-            "note": "The judge allows delivery within the approved response boundary.",
-        }
+        plan_type = "direct_delivery"
 
-    debt_kind = list(war_room.get("epistemic_debt", {}).get("debt_kind", []))
-    if requires_search and "evidence_gap" not in debt_kind:
-        debt_kind.append("evidence_gap")
+    source_lane = _derive_source_lane_from_plan(user_input, plan_type, required_tool=required_tool)
+    output_act = _derive_output_act_from_turn(user_input, plan_type, response_strategy=response_strategy)
 
-    next_best_action = str((decision or {}).get("instruction") or "").strip()
-    if action == "phase_3" or answer_now:
-        next_best_action = "Deliver the approved answer now."
-    elif action == "plan_more":
-        next_best_action = "Run one more planning cycle before delivery."
-    elif action == "answer_not_ready":
-        next_best_action = "Explain the limitation clearly and ask for the smallest useful clarification."
+    goal_lock = _derive_goal_lock_v2(user_input, start_gate_review)
+    user_goal = str(goal_lock.get("user_goal_core") or user_input or "").strip()
+    if plan_type == "tool_evidence":
+        evidence_policy = "Tool results are needed; do not finalize before reading them."
+        executor_instruction = required_tool or "Run the concrete retrieval tool that matches the current request."
+        success = ["The tool result is relevant to the current user question.", "Retrieved findings can be delivered in findings-first form."]
+        rejection = ["Using unrelated search results as the answer.", "Deflecting the user back to search again."]
+    elif plan_type == "recent_dialogue_review":
+        evidence_policy = "Read recent raw dialogue and keep user/assistant roles separate."
+        executor_instruction = "Review recent dialogue as source text and identify the intended continuation or correction."
+        success = ["Uses concrete recent turns as evidence.", "Does not distort user and assistant roles."]
+        rejection = ["Answers generically without recent raw dialogue.", "Treats user speech as assistant speech."]
+    elif plan_type == "raw_source_analysis":
+        evidence_policy = "Read raw diary/file/chat text and separate fact from interpretation."
+        executor_instruction = required_tool or "Read the raw source and extract evidence that matches the requested analysis axis."
+        success = ["Separates source-derived facts first.", "Does not confuse source reading with tool planning."]
+        rejection = ["Fills gaps by inference without source text.", "Conflates fact and interpretation."]
+    elif plan_type == "warroom_deliberation":
+        evidence_policy = "Reasoning, intent, and structure matter more than tool retrieval here; avoid generic limitation loops."
+        executor_instruction = str(action_plan.get("current_step_goal") or response_strategy.get("answer_goal") or "Clarify the reasoning and answer boundary for the current turn.").strip()
+        success = ["Understands what the user is really asking.", "Separates reasoning, obligation, gaps, and answer boundary.", "Produces an answer seed phase_3 can say directly."]
+        rejection = ["Only repeats that evidence is missing.", "Wraps user input in report style.", "Sends a no-tool turn into 2a/2b unnecessarily."]
+    else:
+        evidence_policy = "Answer directly within the current user turn and approved response strategy."
+        executor_instruction = str(response_strategy.get("answer_goal") or action_plan.get("current_step_goal") or "Answer the current request naturally and directly.").strip()
+        success = ["Directly answers the user request.", "Does not use internal report tone."]
+        rejection = ["Repeats the user input as an observation.", "Falls into an unnecessary evidence loop."]
 
-    war_room["freedom"] = freedom
-    war_room["epistemic_debt"] = {
-        "debt_kind": _dedupe_keep_order(debt_kind),
-        "missing_items": list(missing_items)[:4],
-        "why_tool_not_used": (
-            "The judge determined that another tool call was unnecessary for this turn."
-            if action not in {"call_tool", "plan_more", "answer_not_ready"}
-            else "The judge kept the case in planning mode because better grounding was still needed."
-            if action in {"plan_more", "answer_not_ready"}
-            else "The judge selected a tool because the current evidence boundary was too weak."
-        ),
-        "next_best_action": next_best_action,
-    }
-    return _upsert_war_room_agent_note(war_room, {
-        "agent_name": "-1b",
-        "used_freedom": bool(freedom.get("granted")),
-        "freedom_scope": str(freedom.get("scope") or "none"),
-        "shortage_reason": str((decision or {}).get("memo") or "").strip() or "The judge did not record a detailed shortage memo.",
-        "missing_items": list(missing_items)[:4],
-        "why_no_tool": war_room["epistemic_debt"]["why_tool_not_used"],
-        "allowed_output_boundary": "Only what the judge approved may reach phase_3." + (f" Judge notes: {' / '.join(judge_notes[:2])}" if judge_notes else ""),
+    delivery_shape = str(goal_lock.get("answer_shape") or "").strip() or {
+        "tool_evidence": "findings_first",
+        "recent_dialogue_review": "conversation_review",
+        "raw_source_analysis": "source_grounded_summary",
+        "warroom_deliberation": "deliberative_answer",
+        "direct_delivery": "direct_answer",
+    }.get(plan_type, "direct_answer")
+    if output_act == "self_critique":
+        delivery_shape = "fault_admission + concrete_cause + fix_plan"
+        success = _dedupe_keep_order(
+            list(success)
+            + [
+                "Admit the concrete assistant failure based on recent dialogue evidence.",
+                "Explain the structural cause of the failure.",
+                "Name the next correction direction.",
+            ]
+        )[:6]
+        rejection = _dedupe_keep_order(
+            list(rejection)
+            + [
+                "Only summarizes recent dialogue and skips self-critique.",
+                "Ends with a generic apology only.",
+            ]
+        )[:6]
+    elif output_act == "deliver_findings":
+        delivery_shape = "findings_first"
+    elif output_act == "execute_game":
+        delivery_shape = "execute_first_step"
+
+    confidence = 0.76
+    if plan_type in {"tool_evidence", "raw_source_analysis"} and not required_tool:
+        confidence = 0.58
+    if plan_type == "warroom_deliberation" and required_tool:
+        confidence = 0.45
+
+    return _normalize_operation_plan({
+        "plan_type": plan_type,
+        "source_lane": source_lane,
+        "output_act": output_act,
+        "user_goal": user_goal,
+        "executor_instruction": executor_instruction,
+        "evidence_policy": evidence_policy,
+        "success_criteria": success,
+        "rejection_criteria": rejection,
+        "delivery_shape": delivery_shape,
+        "confidence": confidence,
     })
+
 
 def _build_reasoning_board_from_analysis(state: AnimaState, analysis_data: dict):
     board = _empty_reasoning_board(
@@ -1331,7 +2390,7 @@ def _build_reasoning_board_from_analysis(state: AnimaState, analysis_data: dict)
     if analytical_thought:
         board["open_questions"].append(analytical_thought)
 
-    board["final_fact_ids"] = [fact["fact_id"] for fact in board["fact_cells"][:3]]
+    board["final_fact_ids"] = []
     board["open_questions"] = _dedupe_keep_order(board["open_questions"])
     board["search_requests"] = _dedupe_keep_order(board["search_requests"])
     status = str(analysis_data.get("investigation_status") or "").upper()
@@ -1340,7 +2399,6 @@ def _build_reasoning_board_from_analysis(state: AnimaState, analysis_data: dict)
     critic_report["analytical_thought"] = analytical_thought
     critic_report["source_judgments"] = source_judgments if isinstance(source_judgments, list) else []
     critic_report["open_questions"] = list(board["open_questions"])
-    critic_report["recommended_searches"] = []
     critic_report["recommended_action"] = _analysis_status_to_recommended_action(status)
 
     objections = []
@@ -1367,156 +2425,399 @@ def _build_reasoning_board_from_analysis(state: AnimaState, analysis_data: dict)
     board["critic_report"] = critic_report
     return board
 
-def _reasoning_board_packet_for_prompt(board: dict, approved_only: bool = False):
-    if not isinstance(board, dict) or not board:
-        return "사용 가능한 추론 보드가 없습니다."
+_START_GATE_INTENTS = {
+    "providing_current_memory",
+    "requesting_memory_recall",
+    "public_knowledge_question",
+    "direct_social",
+    "correction_or_feedback",
+    "capability_boundary_question",
+    "task_or_tool_request",
+    "other",
+}
 
-    fact_map = {
-        str(fact.get("fact_id") or "").strip(): fact
-        for fact in board.get("fact_cells", [])
-        if isinstance(fact, dict)
+_START_GATE_ANSWER_MODES = {
+    "current_turn_grounding",
+    "grounded_recall",
+    "public_parametric_knowledge",
+    "generic_dialogue",
+}
+
+
+def _safe_model_dump(value):
+    if isinstance(value, dict):
+        return dict(value)
+    if hasattr(value, "model_dump"):
+        try:
+            return value.model_dump()
+        except Exception:
+            return {}
+    if hasattr(value, "dict"):
+        try:
+            return value.dict()
+        except Exception:
+            return {}
+    return {}
+
+
+def _generic_normalized_goal_for_start_gate(intent: str, answer_mode: str):
+    if answer_mode == "current_turn_grounding" or intent == "providing_current_memory":
+        return "Respond directly to the user-provided current-turn fact or story."
+    if answer_mode == "grounded_recall" or intent == "requesting_memory_recall":
+        return "Answer the memory-recall request only after grounded stored evidence is available."
+    if answer_mode == "public_parametric_knowledge" or intent == "public_knowledge_question":
+        return "Answer the public-knowledge question directly without private-memory retrieval."
+    if intent == "correction_or_feedback":
+        return "Acknowledge the correction or feedback and answer the immediate turn."
+    if intent == "capability_boundary_question":
+        return "Explain the assistant's current memory/source access boundary directly."
+    if intent == "direct_social":
+        return "Respond naturally to the current social turn."
+    if intent == "task_or_tool_request":
+        return "Plan the requested task before any tool execution."
+    return "Answer the current turn."
+
+
+def _fallback_start_gate_turn_contract(
+    user_input: str,
+    recent_context: str = "",
+    goal_contract: dict | None = None,
+):
+    text = str(user_input or "").strip()
+    goal_contract = goal_contract if isinstance(goal_contract, dict) else _derive_user_goal_contract(text, source_lane="direct_dialogue")
+    policy = _answer_mode_policy_for_turn(text, recent_context, goal_contract)
+    preferred = str(policy.get("preferred_answer_mode") or "generic_dialogue").strip()
+    if bool(policy.get("grounded_delivery_required")):
+        if str(policy.get("question_class") or "").strip() == "grounded_memory_recall":
+            answer_mode = "grounded_recall"
+            intent = "requesting_memory_recall"
+        else:
+            answer_mode = "generic_dialogue"
+            intent = "task_or_tool_request"
+    elif preferred == "current_turn_grounding":
+        answer_mode = "current_turn_grounding"
+        intent = "providing_current_memory"
+    elif preferred == "public_parametric_knowledge":
+        answer_mode = "public_parametric_knowledge"
+        intent = "public_knowledge_question"
+    else:
+        answer_mode = "generic_dialogue"
+        intent = "other"
+
+    facts = _extract_current_turn_grounding_facts(text, goal_contract)
+    direct_delivery_allowed = answer_mode in {"current_turn_grounding", "public_parametric_knowledge"}
+    requires_grounding = bool(policy.get("grounded_delivery_required"))
+    return {
+        "user_intent": intent,
+        "normalized_goal": _generic_normalized_goal_for_start_gate(intent, answer_mode),
+        "answer_mode_preference": answer_mode,
+        "requires_grounding": requires_grounding,
+        "direct_delivery_allowed": direct_delivery_allowed,
+        "needs_planning": not direct_delivery_allowed,
+        "current_turn_facts": facts,
+        "rationale": "Fallback contract from legacy answer-mode policy; used only when the LLM start gate contract is unavailable.",
+        "contract_source": "fallback_policy",
     }
 
-    if approved_only:
-        final_fact_ids = board.get("final_fact_ids") or list(fact_map.keys())
-        final_pair_ids = set(board.get("final_pair_ids", []))
-        approved_pairs = []
-        for pair in board.get("candidate_pairs", []):
-            if not isinstance(pair, dict):
-                continue
-            if pair.get("audit_status") != "approved":
-                continue
-            if final_pair_ids and pair.get("pair_id") not in final_pair_ids:
-                continue
-            approved_pairs.append(pair)
-        packet = {
-            "final_fact_cells": [fact_map[fid] for fid in final_fact_ids if fid in fact_map],
-            "approved_pairs": approved_pairs,
-            "must_avoid_claims": board.get("must_avoid_claims", []),
-            "direct_answer_seed": board.get("direct_answer_seed", ""),
-            "open_questions": board.get("open_questions", []),
-            "strategist_plan": board.get("strategist_plan", {"case_theory": "", "action_plan": _empty_action_plan()}),
-            "critic_report": board.get("critic_report", _empty_critic_report()),
-            "verdict_board": board.get("verdict_board", _empty_verdict_board()),
-        }
-    else:
-        packet = {
-            "fact_cells": board.get("fact_cells", []),
-            "candidate_pairs": board.get("candidate_pairs", []),
-            "open_questions": board.get("open_questions", []),
-            "search_requests": board.get("search_requests", []),
-            "final_fact_ids": board.get("final_fact_ids", []),
-            "final_pair_ids": board.get("final_pair_ids", []),
-            "must_avoid_claims": board.get("must_avoid_claims", []),
-            "direct_answer_seed": board.get("direct_answer_seed", ""),
-            "strategist_plan": board.get("strategist_plan", {"case_theory": "", "action_plan": _empty_action_plan()}),
-            "critic_report": board.get("critic_report", _empty_critic_report()),
-            "advocate_report": board.get("advocate_report", _empty_advocate_report()),
-            "verdict_board": board.get("verdict_board", _empty_verdict_board()),
-        }
 
-    try:
-        return json.dumps(packet, ensure_ascii=False, indent=2)
-    except TypeError:
-        return str(packet)
+def _normalize_start_gate_turn_contract(contract: dict | StartGateTurnContract | None, user_input: str, recent_context: str = ""):
+    del recent_context
+    payload = _safe_model_dump(contract)
+    if not payload:
+        payload = _fallback_start_gate_turn_contract(user_input)
 
-def _verdict_packet_for_prompt(board: dict):
-    if not isinstance(board, dict) or not board:
-        return "사용 가능한 판결 보드가 없습니다."
-    verdict = board.get("verdict_board", {})
-    if not isinstance(verdict, dict) or not verdict:
-        return "사용 가능한 판결 보드가 없습니다."
-    try:
-        return json.dumps(verdict, ensure_ascii=False, indent=2)
-    except TypeError:
-        return str(verdict)
+    intent = str(payload.get("user_intent") or "other").strip()
+    if intent not in _START_GATE_INTENTS:
+        intent = "other"
+    answer_mode = str(payload.get("answer_mode_preference") or "generic_dialogue").strip()
+    if answer_mode not in _START_GATE_ANSWER_MODES:
+        answer_mode = "generic_dialogue"
 
-def _build_judge_speaker_packet(reasoning_board: dict, response_strategy: dict, phase3_reference_policy: dict):
-    board = reasoning_board if isinstance(reasoning_board, dict) else {}
-    strategy = response_strategy if isinstance(response_strategy, dict) else {}
-    verdict = board.get("verdict_board", {}) if isinstance(board.get("verdict_board"), dict) else {}
-    fact_map = {
-        str(fact.get("fact_id") or "").strip(): fact
-        for fact in board.get("fact_cells", [])
-        if isinstance(fact, dict)
-    }
-    approved_fact_ids = verdict.get("approved_fact_ids", []) if isinstance(verdict.get("approved_fact_ids"), list) else []
-    approved_pair_ids = set(verdict.get("approved_pair_ids", [])) if isinstance(verdict.get("approved_pair_ids"), list) else set()
-    approved_fact_cells = [fact_map[fid] for fid in approved_fact_ids if fid in fact_map]
+    if intent == "providing_current_memory":
+        answer_mode = "current_turn_grounding"
+    elif intent == "requesting_memory_recall":
+        answer_mode = "grounded_recall"
+    elif intent == "public_knowledge_question":
+        answer_mode = "public_parametric_knowledge"
+    elif intent == "capability_boundary_question":
+        answer_mode = "generic_dialogue"
+        payload["requires_grounding"] = False
+        payload["direct_delivery_allowed"] = False
+        payload["needs_planning"] = True
+    elif answer_mode == "grounded_recall":
+        intent = "requesting_memory_recall"
 
-    approved_claims = []
-    for pair in board.get("candidate_pairs", []):
-        if not isinstance(pair, dict):
-            continue
-        if pair.get("audit_status") != "approved":
-            continue
-        pair_id = str(pair.get("pair_id") or "").strip()
-        if approved_pair_ids and pair_id not in approved_pair_ids:
-            continue
-        subjective = pair.get("subjective", {}) if isinstance(pair.get("subjective"), dict) else {}
-        claim_text = str(subjective.get("claim_text") or "").strip()
-        if not claim_text:
-            continue
-        approved_claims.append({
-            "pair_id": pair_id,
-            "paired_fact_digest": str(pair.get("paired_fact_digest") or "").strip(),
-            "claim_text": claim_text,
-            "answer_policy": str(subjective.get("answer_policy") or "cautious").strip(),
-            "uncertainty_note": str(subjective.get("uncertainty_note") or "").strip(),
-        })
+    requires_grounding = bool(payload.get("requires_grounding")) or answer_mode == "grounded_recall"
+    if answer_mode in {"current_turn_grounding", "public_parametric_knowledge"}:
+        requires_grounding = False
 
-    raw_reference = ""
-    reference_mode = ""
-    followup_instruction = ""
-    if isinstance(phase3_reference_policy, dict):
-        raw_reference = str(phase3_reference_policy.get("raw_reference") or "").strip()
-        reference_mode = str(phase3_reference_policy.get("mode") or "").strip()
-        followup_instruction = str(phase3_reference_policy.get("followup_instruction") or "").strip()
+    direct_delivery_allowed = bool(payload.get("direct_delivery_allowed"))
+    if answer_mode in {"current_turn_grounding", "public_parametric_knowledge"}:
+        direct_delivery_allowed = True
+    if requires_grounding or answer_mode == "grounded_recall":
+        direct_delivery_allowed = False
 
-    verdict_answer_brief = str(verdict.get("final_answer_brief") or "").strip()
-    strategy_answer_seed = str(strategy.get("direct_answer_seed") or "").strip()
-    if verdict_answer_brief and _looks_like_internal_delivery_leak(verdict_answer_brief) and strategy_answer_seed:
-        answer_brief = strategy_answer_seed
-    else:
-        answer_brief = verdict_answer_brief or strategy_answer_seed
-    judge_notes = verdict.get("judge_notes", []) if isinstance(verdict.get("judge_notes"), list) else []
-    must_avoid_claims = board.get("must_avoid_claims", []) if isinstance(board.get("must_avoid_claims"), list) else []
-    reply_mode = str(strategy.get("reply_mode") or "").strip()
-    grounded_mode = bool(approved_fact_cells or approved_claims or answer_brief or raw_reference)
+    needs_planning = bool(payload.get("needs_planning")) or not direct_delivery_allowed
+    if intent == "task_or_tool_request":
+        direct_delivery_allowed = False
+        needs_planning = True
+
+    raw_goal = str(payload.get("normalized_goal") or "").strip()
+    user_text = str(user_input or "").strip()
+    normalized_user = unicodedata.normalize("NFKC", user_text)
+    normalized_goal = raw_goal
+    if not normalized_goal or unicodedata.normalize("NFKC", normalized_goal) == normalized_user:
+        normalized_goal = _generic_normalized_goal_for_start_gate(intent, answer_mode)
+    normalized_goal = _compact_user_facing_summary(normalized_goal, 180)
+
+    facts = []
+    for fact in payload.get("current_turn_facts", []) or []:
+        fact_text = str(fact or "").strip()
+        if fact_text:
+            facts.append(_compact_user_facing_summary(fact_text, 260))
+    if answer_mode == "current_turn_grounding" and not facts and user_text:
+        facts = _extract_current_turn_grounding_facts(user_text)
+        if not facts:
+            facts = [_compact_user_facing_summary(user_text, 260)]
 
     return {
-        "speaker_mode": "grounded_mode" if grounded_mode else "direct_dialogue_mode",
-        "reply_mode": reply_mode or ("grounded_answer" if grounded_mode else "cautious_minimal"),
-        "answer_now": bool(verdict.get("answer_now", False)),
-        "requires_search": bool(verdict.get("requires_search", False)),
-        "final_answer_brief": answer_brief,
-        "approved_fact_cells": approved_fact_cells,
-        "approved_claims": approved_claims,
-        "must_avoid_claims": _dedupe_keep_order([str(item).strip() for item in must_avoid_claims if str(item).strip()]),
-        "judge_notes": _dedupe_keep_order([str(note).strip() for note in judge_notes if str(note).strip()]),
-        "tone_strategy": str(strategy.get("tone_strategy") or "").strip(),
-        "uncertainty_policy": str(strategy.get("uncertainty_policy") or "").strip(),
-        "answer_outline": strategy.get("answer_outline", []) if isinstance(strategy.get("answer_outline"), list) else [],
-        "reference_mode": reference_mode,
-        "followup_instruction": followup_instruction,
-        "raw_reference_excerpt": raw_reference,
+        "schema": "StartGateTurnContract.v1",
+        "user_intent": intent,
+        "normalized_goal": normalized_goal,
+        "answer_mode_preference": answer_mode,
+        "requires_grounding": requires_grounding,
+        "direct_delivery_allowed": direct_delivery_allowed,
+        "needs_planning": needs_planning,
+        "current_turn_facts": _dedupe_keep_order(facts)[:4],
+        "rationale": _compact_user_facing_summary(str(payload.get("rationale") or ""), 240),
+        "contract_source": str(payload.get("contract_source") or "llm_start_gate").strip() or "llm_start_gate",
     }
 
 
-def _judge_speaker_packet_for_prompt(judge_speaker_packet: dict):
-    if not isinstance(judge_speaker_packet, dict) or not judge_speaker_packet:
-        return "사용 가능한 판사 공개 발화 패킷이 없습니다."
-    try:
-        return json.dumps(judge_speaker_packet, ensure_ascii=False, indent=2)
-    except TypeError:
-        return str(judge_speaker_packet)
+def _answer_mode_policy_from_start_gate_turn_contract(contract: dict | None, fallback_policy: dict | None = None):
+    fallback_policy = fallback_policy if isinstance(fallback_policy, dict) else {}
+    contract = contract if isinstance(contract, dict) else {}
+    answer_mode = str(contract.get("answer_mode_preference") or "").strip()
+    intent = str(contract.get("user_intent") or fallback_policy.get("question_class") or "generic_dialogue").strip()
+    preferred = "grounded_answer" if answer_mode == "grounded_recall" else answer_mode
+    if preferred not in {"grounded_answer", "current_turn_grounding", "public_parametric_knowledge", "generic_dialogue"}:
+        preferred = str(fallback_policy.get("preferred_answer_mode") or "generic_dialogue").strip() or "generic_dialogue"
+    return {
+        "question_class": intent,
+        "preferred_answer_mode": preferred,
+        "grounded_delivery_required": bool(contract.get("requires_grounding")) or answer_mode == "grounded_recall",
+        "parametric_knowledge_allowed": answer_mode == "public_parametric_knowledge",
+        "current_turn_grounding_ready": answer_mode == "current_turn_grounding",
+        "direct_delivery_allowed": bool(contract.get("direct_delivery_allowed")),
+        "start_gate_contract_source": str(contract.get("contract_source") or "").strip(),
+    }
 
-def _normalize_user_facing_text(text: str):
-    normalized = unicodedata.normalize("NFKC", str(text or ""))
-    normalized = unicodedata.normalize("NFC", normalized)
-    normalized = re.sub(r"[ \t]+\n", "\n", normalized)
-    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
-    return normalized.strip()
+
+def _llm_start_gate_turn_contract(
+    user_input: str,
+    recent_context: str,
+    working_memory: dict,
+    reasoning_plan: dict,
+    s_thinking_history: dict | None = None,
+):
+    del working_memory
+    text = str(user_input or "").strip()
+    if not text:
+        return _normalize_start_gate_turn_contract(
+            {
+                "user_intent": "other",
+                "normalized_goal": "Answer the current turn.",
+                "answer_mode_preference": "generic_dialogue",
+                "requires_grounding": False,
+                "direct_delivery_allowed": False,
+                "needs_planning": True,
+                "current_turn_facts": [],
+                "rationale": "Empty turn.",
+            },
+            text,
+            recent_context,
+        )
+
+    history_prompt = "{}"
+    if isinstance(s_thinking_history, dict) and s_thinking_history:
+        history_prompt = json.dumps(s_thinking_history, ensure_ascii=False, separators=(",", ":"))
+    system_prompt = (
+        "You are ANIMA -1s. Produce only a thin start-gate contract.\n"
+        "Rules:\n"
+        "1. Decide the current turn meaning from current_user_turn, recent context, and s_thinking_history; do not use isolated keywords.\n"
+        "2. Use s_thinking_history to avoid repeating the same broad direction or main_gap when prior cycles stalled.\n"
+        "3. If the user shares a present-turn memory/story/fact, choose providing_current_memory and current_turn_grounding.\n"
+        "4. If the user asks whether you can access/search/use/read/see a source, memory, diary, or database, choose capability_boundary_question and generic_dialogue. Korean examples: '내 일기를 볼 수 있어?', 'DB 검색 가능해?', '기억에 접근할 수 있어?' This asks about capability, not retrieval.\n"
+        "5. If the user asks to remember, retrieve, verify, search, or report a concrete past stored fact, choose requesting_memory_recall and grounded_recall. Example: '내 일기에서 X를 찾아봐.'\n"
+        "6. If the user asks about public media or general knowledge, choose public_knowledge_question and public_parametric_knowledge.\n"
+        "7. normalized_goal must be abstract; do not choose tools, write search queries, or write final answer text."
+    )
+    human_prompt = (
+        f"[current_user_turn]\n{text}\n\n"
+        f"[recent_context_excerpt]\n{_compact_user_facing_summary(recent_context, 900)}\n\n"
+        f"[s_thinking_history]\n{history_prompt}\n\n"
+        f"[reasoning_plan_hint]\n{json.dumps(reasoning_plan if isinstance(reasoning_plan, dict) else {}, ensure_ascii=False)}"
+    )
+    try:
+        structured_llm = llm.with_structured_output(StartGateTurnContract)
+        parsed = structured_llm.invoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=human_prompt),
+        ])
+        payload = _safe_model_dump(parsed)
+        payload["contract_source"] = "llm_start_gate"
+        return _normalize_start_gate_turn_contract(payload, text, recent_context)
+    except Exception as exc:
+        fallback = _fallback_start_gate_turn_contract(text, recent_context)
+        fallback["rationale"] = f"LLM start gate unavailable; using fallback contract. {type(exc).__name__}"
+        return _normalize_start_gate_turn_contract(fallback, text, recent_context)
+
+
+def _build_start_gate_switches(
+    user_input: str,
+    recent_context: str,
+    working_memory: dict,
+    start_gate_review: dict,
+    reasoning_plan: dict,
+    start_gate_turn_contract: dict | StartGateTurnContract | None = None,
+):
+    text = str(user_input or "").strip()
+    artifact_hint = _extract_artifact_hint(text)
+    explicit_search = _extract_explicit_search_keyword(text)
+    working_memory = working_memory if isinstance(working_memory, dict) else {}
+    temporal_context = working_memory.get("temporal_context", {})
+    if not isinstance(temporal_context, dict):
+        temporal_context = {}
+    goal_contract = _derive_user_goal_contract(text, source_lane="direct_dialogue")
+    fallback_policy = _answer_mode_policy_for_turn(text, recent_context, goal_contract)
+    turn_contract = _normalize_start_gate_turn_contract(
+        start_gate_turn_contract or _fallback_start_gate_turn_contract(text, recent_context, goal_contract),
+        text,
+        recent_context,
+    )
+    normalized_goal = str(turn_contract.get("normalized_goal") or "").strip() or _normalized_goal_from_contract(goal_contract, text)
+    answer_mode_policy = _answer_mode_policy_from_start_gate_turn_contract(turn_contract, fallback_policy)
+    direct_delivery_allowed = bool(turn_contract.get("direct_delivery_allowed"))
+    requires_grounding = bool(turn_contract.get("requires_grounding"))
+    needs_planning = bool(turn_contract.get("needs_planning")) or not direct_delivery_allowed
+    ops_next_hop = "phase_3" if direct_delivery_allowed else "-1a_thinker"
+    turn_family = "direct_delivery" if direct_delivery_allowed else "planning_contract"
+    try:
+        topic_reset_confidence = float(temporal_context.get("topic_reset_confidence", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        topic_reset_confidence = 0.0
+    allow_task_inheritance = (
+        bool(temporal_context.get("carry_over_allowed"))
+        and not artifact_hint
+        and not explicit_search
+        and topic_reset_confidence < 0.7
+    )
+    situation_frame = {
+        "turn_family": turn_family,
+        "direct_strategy": "",
+        "root_target": "",
+        "relevant_branch_paths": [],
+        "evidence_need": "grounded_source" if requires_grounding else "llm_or_current_turn",
+        "user_need_summary": normalized_goal,
+        "avoid": [
+            "Do not create tool names, search queries, or direct-delivery scripts in phase -1s.",
+            "Do not copy raw user wording into planner goal fields.",
+        ],
+    }
+
+    return {
+        "contract_kind": "thin_start_gate_v1",
+        "normalized_goal": normalized_goal,
+        "start_gate_turn_contract": turn_contract,
+        "goal_contract": goal_contract,
+        "answer_mode_policy": answer_mode_policy,
+        "requires_grounding": requires_grounding,
+        "direct_delivery_allowed": direct_delivery_allowed,
+        "needs_planning": needs_planning,
+        "ops_next_hop": ops_next_hop,
+        "direct_strategy": "",
+        "requested_move": "",
+        "artifact_hint": artifact_hint,
+        "explicit_search": explicit_search,
+        "turn_family": turn_family,
+        "reflective_mode": "",
+        "answer_shape_hint": "",
+        "force_tool_first": False,
+        "force_recent_dialogue_review": False,
+        "allow_task_inheritance": allow_task_inheritance,
+        "allow_recent_hints": topic_reset_confidence < 0.7,
+        "memo": "thin start gate produced a normalized goal contract only.",
+        "current_turn_facts": list(turn_contract.get("current_turn_facts", []) or []),
+        "situation_frame": situation_frame,
+    }
+
+
+def _looks_like_dialogue_audit_turn(user_input: str, recent_context: str = ""):
+    text = unicodedata.normalize("NFKC", str(user_input or "")).lower()
+    if not text:
+        return False
+    context_words = ["conversation", "recent", "previous", "\ub300\ud654", "\ucd5c\uadfc", "\uc774\uc804"]
+    audit_words = ["summarize", "review", "check", "audit", "\uc694\uc57d", "\uc815\ub9ac", "\uac80\ud1a0"]
+    if any(word in text for word in context_words) and any(word in text for word in audit_words):
+        return True
+    return bool(recent_context) and any(word in text for word in audit_words)
+
+
+def _fast_start_gate_assessment(user_input: str, recent_context: str, working_memory: dict, reasoning_plan: dict):
+    text = str(user_input or "").strip()
+    del recent_context, working_memory
+    artifact_hint = _extract_artifact_hint(text)
+    explicit_search = _extract_explicit_search_keyword(text)
+    preferred_path = str((reasoning_plan or {}).get("preferred_path") or "").strip()
+    rationale = str((reasoning_plan or {}).get("rationale") or "").strip()
+
+    risk_flags = []
+    if not text:
+        return {
+            "answerability": "needs_planning",
+            "recommended_handler": "-1a_thinker",
+            "confidence": 0.4,
+            "why_short": "Empty turn; downstream planner should decide whether to speak.",
+            "risk_flags": ["empty_turn"],
+        }
+
+    if artifact_hint:
+        return {
+            "answerability": "needs_planning",
+            "recommended_handler": "-1a_thinker",
+            "confidence": 0.92,
+            "why_short": "An artifact/source review was requested, so the strategist should plan the read before anyone speaks.",
+            "risk_flags": ["source_specific", "grounding_required"],
+        }
+
+    if explicit_search:
+        risk_flags.extend(["grounding_required"])
+        risk_flags.append("search_phrase_detected")
+        return {
+            "answerability": "needs_grounding",
+            "recommended_handler": "-1a_thinker",
+            "confidence": 0.8,
+            "why_short": "An explicit search phrase exists; -1a should decide whether and how to use tools.",
+            "risk_flags": risk_flags,
+        }
+
+    if _normalize_reasoning_preferred_path(preferred_path) == "delivery_contract":
+        risk_flags.append("delivery_contract_needs_judgment")
+        return {
+            "answerability": "direct_but_risky",
+            "recommended_handler": "-1a_thinker",
+            "confidence": 0.7,
+            "why_short": rationale or "The runtime hint says a delivery contract may be enough; -1a should confirm the framing before delivery.",
+            "risk_flags": risk_flags,
+        }
+
+    return {
+        "answerability": "needs_planning",
+        "recommended_handler": "-1a_thinker",
+        "confidence": 0.65,
+        "why_short": rationale or "This is not a trivial direct-answer turn, so the strategist should take the first pass.",
+        "risk_flags": risk_flags,
+    }
 
 
 def _phase3_recent_context_excerpt(recent_context: str, max_chars: int = 1400):
@@ -1546,7 +2847,7 @@ def _extract_recent_raw_turns_from_context(recent_context: str, max_turns: int =
         line = raw_line.strip()
         if not line:
             continue
-        matched = re.match(r"^(user|assistant):\s*(.*)$", line, re.IGNORECASE)
+        matched = re.match(r"^\[?(user|assistant)\]?:\s*(.*)$", line, re.IGNORECASE)
         if matched:
             if current:
                 turns.append(current)
@@ -1563,139 +2864,155 @@ def _extract_recent_raw_turns_from_context(recent_context: str, max_turns: int =
 
 
 def _is_recent_dialogue_review_turn(user_input: str, recent_context: str = ""):
+    text = unicodedata.normalize("NFKC", str(user_input or "").strip()).lower()
+    if not text:
+        return False
+    markers = [
+        "review the conversation",
+        "read the recent chat",
+        "recent dialogue",
+        "what was weird",
+        "\ucd5c\uadfc \ub300\ud654",
+        "\uc774\uc804 \ub300\ud654",
+        "\ub300\ud654 \uac80\ud1a0",
+    ]
+    if any(marker in text for marker in markers):
+        return True
+    return bool(recent_context) and any(marker in text for marker in ["review", "summarize", "\uc694\uc57d", "\uac80\ud1a0"])
+
+def _is_date_memory_recall_turn(user_input: str):
     text = str(user_input or "").strip()
-    normalized = unicodedata.normalize("NFKC", text).lower()
-    if not normalized:
+    if not text:
         return False
 
-    review_markers = [
-        "최근 대화",
-        "지금까지의 대화",
-        "이전 대화",
-        "방금 대화",
-        "대화가 어디가 이상",
-        "최근 대화를 읽고",
-        "최근 대화를 보고",
-        "대화를 읽고 알아내",
-        "대화를 읽고 말해",
-        "직접 확인해봐",
-        "문제점을 말해",
-        "어디가 이상한지",
-        "네가 알아보라고",
-        "네가 알아보라",
-        "네가 알아봐",
-        "네가 직접 알아봐",
-        "니가 알아보라고",
-        "니가 알아봐",
-        "직접 읽어봐",
-        "다시 읽어봐",
-        "읽고 판단해",
-    ]
-    if any(marker in text for marker in review_markers):
-        return True
-
-    if recent_context and any(marker in normalized for marker in ["what was weird", "review the conversation", "read the recent chat"]):
-        return True
-
-    return False
-
-def _looks_like_internal_delivery_leak(text: str):
-    normalized = unicodedata.normalize("NFKC", str(text or "")).lower()
-    if not normalized:
+    date_like = bool(
+        re.search(r"\b\d{4}[-./]\d{1,2}[-./]\d{1,2}\b", text)
+        or re.search(r"\d{4}\s*\ub144\s*\d{1,2}\s*\uc6d4\s*\d{1,2}\s*\uc77c", text)
+    )
+    if not date_like:
         return False
-    internal_markers = [
-        "판사",
-        "검사",
-        "변호사",
-        "워룸",
-        "speaker review",
-        "judge",
-        "critic",
-        "advocate",
-        "speaker packet",
-        "judge_speaker_packet",
-        "승인된 공개본",
+
+    recall_markers = [
+        "\uadf8\ub54c",
+        "\uadf8\ub0a0",
+        "\ud558\ub8e8",
+        "\ub9d0\ud574\ubd10",
+        "\uc5b4\ub5a0",
+        "\ubcf4\ub0b8",
+        "\uae30\uc5b5",
+        "\ube44\uc2b7",
     ]
-    return any(marker in normalized for marker in internal_markers)
+    return any(marker in text for marker in recall_markers)
 
 
-def _build_speaker_review(judge_speaker_packet: dict, user_input: str = "", recent_context_excerpt: str = ""):
-    packet = judge_speaker_packet if isinstance(judge_speaker_packet, dict) else {}
-    speaker_mode = str(packet.get("speaker_mode") or "").strip()
-    reply_mode = str(packet.get("reply_mode") or "").strip()
-    final_answer_brief = str(packet.get("final_answer_brief") or "").strip()
-    followup_instruction = str(packet.get("followup_instruction") or "").strip()
+def _judge_delivery_gate_review(
+    *,
+    user_input: str,
+    recent_context: str,
+    working_memory: dict,
+    reasoning_board: dict,
+    analysis_data: dict,
+    response_strategy: dict,
+    search_results: str,
+    loop_count: int,
+):
+    strategy, packet, review = _prepare_phase3_delivery(
+        user_input=user_input,
+        recent_context=recent_context,
+        working_memory=working_memory,
+        reasoning_board=reasoning_board,
+        analysis_data=analysis_data,
+        response_strategy=response_strategy,
+        search_results=search_results,
+        loop_count=loop_count,
+    )
+
+    normalized_review = json.loads(json.dumps(review, ensure_ascii=False)) if isinstance(review, dict) else {}
+    issues = list(normalized_review.get("issues", [])) if isinstance(normalized_review.get("issues"), list) else []
+    missing = (
+        list(normalized_review.get("missing_for_delivery", []))
+        if isinstance(normalized_review.get("missing_for_delivery"), list)
+        else []
+    )
+
+    combined_delivery_text = " ".join(
+        [
+            str(strategy.get("direct_answer_seed") or "").strip(),
+            str(packet.get("final_answer_brief") or "").strip(),
+            str(packet.get("followup_instruction") or "").strip(),
+        ]
+    ).strip()
+    explicit_search = _extract_explicit_search_keyword(user_input)
+    date_recall_turn = _is_date_memory_recall_turn(user_input)
+    packet_followup = str(packet.get("followup_instruction") or "").strip()
+    packet_brief = str(packet.get("final_answer_brief") or "").strip()
+    delivery_mode = str(packet.get("delivery_freedom_mode") or strategy.get("delivery_freedom_mode") or "").strip()
+    direct_seed = str(strategy.get("direct_answer_seed") or "").strip()
+
+    if (
+        _looks_like_generic_non_answer_text(combined_delivery_text)
+        and (explicit_search or date_recall_turn)
+    ):
+        issues.append("Retrieval or recall request still resolves to a generic non-answer.")
+
+    if delivery_mode == "proposal" and packet_brief and packet_followup and _looks_like_generic_non_answer_text(packet_followup):
+        issues.append("Proposal delivery still carries a generic narrowing follow-up.")
+
+    if date_recall_turn and _looks_like_generic_non_answer_text(combined_delivery_text):
+        missing.append("A dated memory recall request still lacks concrete recalled content.")
+
+    if _looks_like_user_parroting_report(packet_brief, user_input):
+        issues.append("The approved brief still parrots the user's own wording as a report instead of a reply.")
+
+    if _looks_like_user_parroting_report(direct_seed, user_input):
+        issues.append("The direct answer seed still parrots the user's own wording as a report instead of a reply.")
+
     approved_fact_cells = packet.get("approved_fact_cells", []) if isinstance(packet.get("approved_fact_cells"), list) else []
     approved_claims = packet.get("approved_claims", []) if isinstance(packet.get("approved_claims"), list) else []
-    reference_mode = str(packet.get("reference_mode") or "").strip()
+    delivery_ok = not issues and not missing
+    normalized_review["issues"] = _dedupe_keep_order([str(item).strip() for item in issues if str(item).strip()])
+    normalized_review["missing_for_delivery"] = _dedupe_keep_order([str(item).strip() for item in missing if str(item).strip()])
+    normalized_review["delivery_ok"] = delivery_ok
+    normalized_review["should_remand"] = not delivery_ok
 
-    issues = []
-    missing_for_delivery = []
-
-    if _looks_like_internal_delivery_leak(final_answer_brief):
-        issues.append("final_answer_brief is too weak for direct delivery.")
-
-    has_delivery_seed = bool(final_answer_brief or followup_instruction or approved_fact_cells or approved_claims)
-    if not has_delivery_seed and reply_mode not in {"ask_user_question_now", "continue_previous_offer"}:
-        missing_for_delivery.append("A concrete follow-up instruction is missing.")
-
-    if reply_mode == "grounded_answer" and not (final_answer_brief or approved_fact_cells or approved_claims):
-        missing_for_delivery.append("grounded_answer needs at least one grounded fact or claim.")
-
-    if speaker_mode == "grounded_mode" and not (approved_fact_cells or approved_claims or final_answer_brief):
-        issues.append("grounded_mode was selected without enough approved delivery material.")
-
-    if reference_mode == "hidden_large_raw" and not (final_answer_brief or followup_instruction):
-        missing_for_delivery.append("A direct dialogue path still needs a clearer follow-up intent.")
-
-    if not str(user_input or "").strip() and not str(recent_context_excerpt or "").strip():
-        issues.append("Neither the current user input nor recent context is available for speaker delivery.")
-
-    delivery_ok = not issues and not missing_for_delivery
     if delivery_ok:
-        suggested_action = "deliver_now"
-    elif missing_for_delivery and not approved_fact_cells and not approved_claims:
-        suggested_action = "strengthen_response_strategy"
-    elif followup_instruction:
-        suggested_action = "followup_only"
+        normalized_review["suggested_action"] = "deliver_now"
+    elif explicit_search or date_recall_turn:
+        normalized_review["suggested_action"] = "remand_to_judge"
+    elif normalized_review["missing_for_delivery"] and not approved_fact_cells and not approved_claims:
+        normalized_review["suggested_action"] = "strengthen_response_strategy"
     else:
-        suggested_action = "remand_to_judge"
+        normalized_review["suggested_action"] = str(normalized_review.get("suggested_action") or "remand_to_judge")
 
-    return {
-        "delivery_ok": delivery_ok,
-        "should_remand": not delivery_ok,
-        "issues": issues,
-        "missing_for_delivery": missing_for_delivery,
-        "suggested_action": suggested_action,
-        "reply_mode": reply_mode,
-    }
+    return strategy, packet, normalized_review
 
-def _minimal_direct_dialogue_strategy(user_input: str, working_memory: dict):
+def _base_minimal_direct_dialogue_strategy(user_input: str, working_memory: dict):
     current_user_text = str(user_input or "").strip()
     active_task = _working_memory_active_task(working_memory)
-    must_include = [f"현재 사용자 요청: {current_user_text}"] if current_user_text else []
+    must_include = [f"current user request: {current_user_text}"] if current_user_text else []
     if active_task and active_task != current_user_text:
-        must_include.append(f"현재 작업 맥락: {active_task}")
+        must_include.append(f"current task context: {active_task}")
 
     return {
         "reply_mode": "cautious_minimal",
-        "answer_goal": "현재 사용자 요청에 직접 답하되, 대화 드리프트를 최소화한다.",
-        "tone_strategy": "차분하고, 짧고, 근거 중심으로 말한다. 내부 역할 누수와 과한 설명을 피한다.",
-        "evidence_brief": f"현재 사용자 요청: {current_user_text}" if current_user_text else "현재 사용자 턴을 주된 근거 앵커로 사용한다.",
-        "reasoning_brief": "3차는 현재 요청에 직접 답하고, 정말 필요할 때만 후속 질문 한 개를 붙인다.",
-        "direct_answer_seed": "현재 사용자 요청에 직접 답하고, 필요할 때만 정확한 후속 질문 한 개를 덧붙인다.",
+        "delivery_freedom_mode": "grounded",
+        "answer_goal": "Answer the current user request directly with minimal scripted shaping.",
+        "tone_strategy": "Calm, direct, evidence-aware, and free of internal report tone.",
+        "evidence_brief": f"current user request: {current_user_text}" if current_user_text else "Use the current user turn as the primary evidence focus.",
+        "reasoning_brief": "Phase 3 should answer the current request directly and ask a follow-up only if truly needed.",
+        "direct_answer_seed": "",
         "must_include_facts": must_include,
         "must_avoid_claims": [
-            "내부 역할, 판사 패킷, 숨겨진 워크플로를 노출하지 말 것.",
-            "현재 패킷이 실제로 지지하지 않는 내용을 아는 척하지 말 것.",
-            "직접 답변을 모호한 군더더기나 빈 예의 표현으로 대체하지 말 것.",
+            "Do not mention internal roles, judge packets, or stage workflows.",
+            "Do not pretend unsupported context exists.",
+            "Do not replace a direct answer with vague filler.",
         ],
         "answer_outline": [
-            "현재 사용자 요청에 직접 답한다.",
-            "정말 중요할 때만 한계를 짧게 밝힌다.",
-            "필요할 때만 정확한 후속 질문 한 개를 쓴다.",
+            "Answer the current user request directly.",
+            "Briefly state limits only if important.",
+            "Ask at most one precise follow-up if needed.",
         ],
-        "uncertainty_policy": "근거가 약하면 추측하지 말고 한계를 분명히 말한다.",
+        "uncertainty_policy": "If evidence is weak, state the limit clearly instead of guessing.",
     }
 
 def _prepare_phase3_delivery(
@@ -1728,13 +3045,6 @@ def _prepare_phase3_delivery(
 
     return strategy, packet, review
 
-
-def _war_room_packet_for_prompt(war_room: dict):
-    normalized = _normalize_war_room_state(war_room)
-    try:
-        return json.dumps(normalized, ensure_ascii=False, indent=2)
-    except TypeError:
-        return str(normalized)
 
 def _apply_strategist_output_to_reasoning_board(board: dict, strategist_payload: dict):
     if not isinstance(board, dict):
@@ -1784,23 +3094,37 @@ def _apply_strategist_output_to_reasoning_board(board: dict, strategist_payload:
     if not isinstance(response_strategy, dict):
         response_strategy = {}
 
+    operation_plan = _normalize_operation_plan(strategist_payload.get("operation_plan", {}))
     case_theory = str(strategist_payload.get("case_theory") or "").strip()
     action_plan = _normalize_action_plan(strategist_payload.get("action_plan", {}))
+    goal_lock = _normalize_goal_lock(strategist_payload.get("goal_lock", {}))
+    strategist_goal = _normalize_strategist_goal(strategist_payload.get("strategist_goal", {}))
+    convergence_state = _normalize_convergence_state(strategist_payload.get("convergence_state", ""))
+    achieved_findings = _normalize_short_string_list(strategist_payload.get("achieved_findings", []), limit=3)
+    delivery_readiness = _normalize_delivery_readiness(strategist_payload.get("delivery_readiness", ""))
+    next_frontier = _normalize_short_string_list(strategist_payload.get("next_frontier", []), limit=3)
+    war_room_contract = _normalize_war_room_operating_contract(strategist_payload.get("war_room_contract", {}))
     requested_fact_ids = []
     for pair in candidate_pairs:
         requested_fact_ids.extend(pair.get("fact_ids", []))
     requested_fact_ids = _dedupe_keep_order(requested_fact_ids)
 
     next_board["candidate_pairs"] = candidate_pairs
-    next_board["final_fact_ids"] = [fid for fid in requested_fact_ids if fid in fact_map] or [
-        fact["fact_id"] for fact in next_board.get("fact_cells", [])[:3]
-    ]
+    next_board["final_fact_ids"] = [fid for fid in requested_fact_ids if fid in fact_map]
     next_board["final_pair_ids"] = []
     next_board["must_avoid_claims"] = _dedupe_keep_order(response_strategy.get("must_avoid_claims", []))
     next_board["direct_answer_seed"] = str(response_strategy.get("direct_answer_seed") or "").strip()
     next_board["strategist_plan"] = {
         "case_theory": case_theory,
+        "operation_plan": operation_plan,
         "action_plan": action_plan,
+        "goal_lock": goal_lock,
+        "strategist_goal": strategist_goal,
+        "convergence_state": convergence_state,
+        "achieved_findings": achieved_findings,
+        "delivery_readiness": delivery_readiness,
+        "next_frontier": next_frontier,
+        "war_room_contract": war_room_contract,
     }
     next_board["advocate_report"] = {
         "defense_strategy": case_theory or str(response_strategy.get("reasoning_brief") or response_strategy.get("answer_goal") or "").strip(),
@@ -1816,6 +3140,13 @@ def _apply_strategist_output_to_reasoning_board(board: dict, strategist_payload:
             "uncertainty_policy": str(response_strategy.get("uncertainty_policy") or "").strip(),
             "current_step_goal": str(action_plan.get("current_step_goal") or "").strip(),
             "required_tool": str(action_plan.get("required_tool") or "").strip(),
+            "operation_plan": operation_plan,
+            "goal_lock": goal_lock,
+            "strategist_goal": strategist_goal,
+            "convergence_state": convergence_state,
+            "delivery_readiness": delivery_readiness,
+            "operation_contract": _normalize_operation_contract(action_plan.get("operation_contract", {})),
+            "war_room_contract": war_room_contract,
         },
     }
     return next_board
@@ -1892,9 +3223,7 @@ def _audit_reasoning_board(board: dict, analysis_data: dict):
     audited["final_pair_ids"] = _dedupe_keep_order(approved_pair_ids)
     audited["final_fact_ids"] = _dedupe_keep_order(approved_fact_ids) or _dedupe_keep_order(
         audited.get("final_fact_ids", [])
-    ) or [
-        fact.get("fact_id") for fact in audited.get("fact_cells", [])[:3] if isinstance(fact, dict)
-    ]
+    )
 
     if status == "COMPLETED":
         judge_notes.append("The critic marked the case as complete.")
@@ -1927,47 +3256,131 @@ def _audit_reasoning_board(board: dict, analysis_data: dict):
     return audited
 
 
+def _extract_achieved_findings_blob_from_memo(memo: str):
+    text = str(memo or "").strip()
+    if not text:
+        return ""
+    match = re.search(
+        r"Achieved findings:\s*(.+?)(?=(?:\s+(?:Goal lock|Convergence|Next steps|Next frontier|Answer brief):)|$)",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not match:
+        return ""
+    return re.sub(r"\s+", " ", str(match.group(1) or "").strip())
+
+
+def _memo_findings_brief_from_auditor_memo(
+    memo: str,
+    strategist_output: dict | None,
+    analysis_data: dict | None,
+):
+    strategist_output = strategist_output if isinstance(strategist_output, dict) else {}
+    analysis_data = analysis_data if isinstance(analysis_data, dict) else {}
+    goal_lock = _normalize_goal_lock(strategist_output.get("goal_lock", {}))
+    answer_shape = str(goal_lock.get("answer_shape") or "").strip()
+    findings_blob = _extract_achieved_findings_blob_from_memo(memo)
+    if not findings_blob:
+        grounded = _normalize_short_string_list(_grounded_findings_from_analysis(analysis_data), limit=3)
+        if not grounded:
+            return ""
+        findings_blob = " / ".join(grounded)
+    if answer_shape == "proposal_1_to_3":
+        return f"Based on the currently confirmed evidence, we can do this today: {findings_blob}"
+    if answer_shape == "self_analysis_snapshot":
+        return f"Based on recent dialogue, the clearest first-pass read is: {findings_blob}"
+    if answer_shape in {"fit_summary", "feature_summary"}:
+        return f"The evidence-backed points that best fit the current goal are: {findings_blob}"
+    if answer_shape == "findings_first":
+        return f"The direct findings available now are: {findings_blob}"
+    if _extract_achieved_findings_blob_from_memo(memo):
+        return findings_blob
+    return ""
+
+
+def _promote_auditor_memo_findings_to_reasoning_board(
+    reasoning_board: dict | None,
+    *,
+    auditor_decision: dict | None,
+    strategist_output: dict | None,
+    analysis_data: dict | None,
+):
+    board = json.loads(json.dumps(reasoning_board, ensure_ascii=False)) if isinstance(reasoning_board, dict) else {}
+    decision = auditor_decision if isinstance(auditor_decision, dict) else {}
+    if str(decision.get("action") or "").strip() != "phase_3":
+        return board
+    memo = str(decision.get("memo") or "").strip()
+    brief = _memo_findings_brief_from_auditor_memo(memo, strategist_output, analysis_data)
+    if not brief:
+        return board
+    verdict_board = board.get("verdict_board", {})
+    if not isinstance(verdict_board, dict):
+        verdict_board = _empty_verdict_board()
+    verdict_board["final_answer_brief"] = brief
+    judge_notes = verdict_board.get("judge_notes", []) if isinstance(verdict_board.get("judge_notes"), list) else []
+    judge_notes.append("The judge promoted memo-grounded findings into the final answer brief for phase 3 delivery.")
+    verdict_board["judge_notes"] = _dedupe_keep_order([str(note).strip() for note in judge_notes if str(note).strip()])
+    board["verdict_board"] = verdict_board
+    return board
+
+
 def _fallback_response_strategy(analysis_data: dict):
     evidences = analysis_data.get("evidences", []) if isinstance(analysis_data, dict) else []
     must_include = []
-    for item in evidences[:3]:
-        fact = str(item.get("extracted_fact") or "").strip()
-        if fact:
-            must_include.append(fact)
+    if isinstance(evidences, list):
+        for item in evidences[:3]:
+            if isinstance(item, dict):
+                fact = str(item.get("extracted_fact") or item.get("observed_fact") or item.get("excerpt") or "").strip()
+            else:
+                fact = str(item or "").strip()
+            if fact:
+                must_include.append(fact)
+    must_include = _dedupe_keep_order(must_include)[:3]
 
     if must_include:
-        answer_goal = "가장 강한 가용 팩트부터 직접 답한다."
+        answer_goal = "Answer directly from the strongest available facts."
         evidence_brief = " / ".join(must_include[:3])
-        reasoning_brief = "근거가 있는 팩트부터 앞세우고, 실제로 지지되는 범위 안에서만 답한다."
-        direct_answer_seed = "가용한 팩트부터 먼저 사용하고, 꼭 필요한 최소한의 해석만 덧붙인다."
+        reasoning_brief = "Use the facts that actually support the answer and stay inside that boundary."
+        direct_answer_seed = "Said narrowly from the confirmed evidence:"
         reply_mode = "grounded_answer"
     else:
-        answer_goal = "현재 한계를 분명히 밝히면서 조심스럽게 답한다."
-        evidence_brief = "현재 패킷에는 약하거나 불완전한 근거만 들어 있다."
-        reasoning_brief = "허세를 부리지 말고 한계를 먼저 밝힌 뒤, 답할 수 있는 범위까지만 답하고 꼭 필요할 때만 정확한 후속 질문을 붙인다."
-        direct_answer_seed = "현재 한계를 분명히 말하고, 가용 근거가 허용하는 범위까지만 답한다."
+        answer_goal = "Answer gently while making the current limit clear."
+        evidence_brief = "Only weak or incomplete evidence is available."
+        reasoning_brief = "Do not over-apologize; state the limit and ask a precise follow-up only if needed."
+        direct_answer_seed = "With the evidence currently available, I cannot settle that yet."
         reply_mode = "cautious_minimal"
 
     return {
         "reply_mode": reply_mode,
+        "delivery_freedom_mode": "grounded" if must_include else "clean_failure",
         "answer_goal": answer_goal,
-        "tone_strategy": "차분하고, 근거 중심이며, 직접적으로 말한다. 내부 역할 누수와 과한 설명을 피한다.",
+        "tone_strategy": "Calm, direct, evidence-aware, and free of internal role explanation.",
         "evidence_brief": evidence_brief,
         "reasoning_brief": reasoning_brief,
         "direct_answer_seed": direct_answer_seed,
         "must_include_facts": must_include,
         "must_avoid_claims": [
-            "현재 패킷에 없는 팩트를 만들어내지 말 것.",
-            "recent_context를 승인된 증거처럼 과해석하지 말 것.",
-            "내부 역할, 판사, 패킷, 숨겨진 워크플로를 노출하지 말 것.",
+            "Do not invent unsupported facts.",
+            "Do not overstate recent_context as confirmed evidence.",
+            "Do not mention internal roles, judge packets, or stage workflows.",
         ],
         "answer_outline": [
-            "사용자 요청에 직접 답한다.",
-            "정말 중요할 때만 한계를 짧게 밝힌다.",
-            "정말 필요할 때만 정확한 후속 질문 한 개를 묻는다.",
+            "Answer the user request directly.",
+            "State limits briefly only when important.",
+            "Ask one precise follow-up only when necessary.",
         ],
-        "uncertainty_policy": "근거가 약하면 추측 대신 한계를 분명히 밝힌다.",
+        "uncertainty_policy": "If evidence is weak, state the boundary instead of guessing.",
     }
+
+
+def _force_findings_first_delivery_strategy(response_strategy: dict, analysis_data: dict, user_input: str):
+    del analysis_data, user_input
+    strategy = response_strategy if isinstance(response_strategy, dict) else {}
+    return strategy
+
+
+def _has_substantive_dialogue_anchor(user_input: str):
+    return _has_substantive_dialogue_anchor_impl(user_input)
 
 
 def _is_casual_social_turn(user_input: str):
@@ -1975,78 +3388,193 @@ def _is_casual_social_turn(user_input: str):
     lowered = unicodedata.normalize("NFKC", text).lower()
     if not text:
         return False
-    if _is_artifact_review_turn(text):
+    if _is_artifact_review_turn(text) or _is_internal_reasoning_turn(text):
         return False
-    if _is_internal_reasoning_turn(text):
+    if _is_assistant_question_request_turn(text) or _is_directive_or_correction_turn(text):
         return False
-    if _is_assistant_question_request_turn(text):
+    if _has_substantive_dialogue_anchor(text):
         return False
-    if _is_directive_or_correction_turn(text):
-        return False
+    social_markers = ["hi", "hello", "thanks", "thank you", "lol", "haha", "\uc548\ub155", "\uace0\ub9c8\uc6cc", "\uc88b\uc544"]
+    return len(text) <= 40 and any(marker in lowered for marker in social_markers)
 
-    greeting_prefixes = ["안녕", "하이", "ㅎㅇ", "헬로", "좋은 아침", "yo"]
-    if any(text.startswith(prefix) for prefix in greeting_prefixes):
-        strong_request_markers = ["왜", "어떻게", "뭐", "무엇", "설명", "분석", "판단", "질문", "알아봐"]
-        if not any(marker in text for marker in strong_request_markers):
-            return True
 
-    social_markers = [
-        "고마워", "감사", "ㅋㅋ", "ㅎㅎ", "좋네", "오케이", "오키", "알겠어", "수고", "굿",
-    ]
-    if any(marker in text for marker in social_markers):
-        return True
+def _is_positive_memory_feedback_turn(user_input: str):
+    text = unicodedata.normalize("NFKC", str(user_input or "").strip()).lower()
+    if not text or "?" in text or len(text) > 80:
+        return False
+    memory_markers = ["remember", "memory", "\uae30\uc5b5"]
+    praise_markers = ["good", "right", "nice", "\ub9de\uc544", "\uc88b\uc544", "\uc815\ud655"]
+    return any(marker in text for marker in memory_markers) and any(marker in text for marker in praise_markers)
 
-    return len(text) <= 20 and lowered in {"ok", "okay", "thanks", "thx", "cool", "nice"}
+
+def _is_personal_experience_recall_turn(user_input: str):
+    text = unicodedata.normalize("NFKC", str(user_input or "").strip()).lower()
+    if not text:
+        return False
+    personal_markers = ["i ", "my ", "me ", "\ub098", "\ub0b4"]
+    recall_markers = ["remember", "recall", "search", "\uae30\uc5b5", "\ucc3e\uc544", "\uac80\uc0c9"]
+    return any(marker in text for marker in personal_markers) and any(marker in text for marker in recall_markers)
+
+
+def _is_social_reentry_turn(user_input: str):
+    text = unicodedata.normalize("NFKC", str(user_input or "").strip()).lower()
+    if not text or len(text) > 70:
+        return False
+    markers = ["back", "again", "long time", "\ub2e4\uc2dc", "\uc624\ub79c\ub9cc", "\ubcf5\uadc0"]
+    return any(marker in text for marker in markers)
 
 
 def _is_internal_reasoning_turn(user_input: str):
-    text = str(user_input or "").strip()
-    lowered = unicodedata.normalize("NFKC", text).lower()
+    text = unicodedata.normalize("NFKC", str(user_input or "").strip()).lower()
     if not text:
         return False
-
-    explicit_lookup_markers = ["읽어봐", "읽고", "자료", "문서", "부가자료", "기획서", "슬라이드", "pptx", "로그", "채팅"]
+    explicit_lookup_markers = ["read", "file", "document", "log", "pptx", "\ubb38\uc11c", "\ud30c\uc77c"]
     if any(marker in text for marker in explicit_lookup_markers):
         return False
-
-    serious_goal_markers = [
-        "목표", "우승", "공모전", "기획", "개선", "전략", "계획", "돈 벌", "경력", "사업", "프로젝트", "시스템", "아키텍처", "논리", "모순",
-    ]
-    reflective_markers = ["왜", "어떻게", "무엇을", "뭐가 문제", "이상한지", "설명해", "분석해", "생각해봐"]
-    english_goal_markers = ["goal", "plan", "career", "money", "build", "project", "startup", "win"]
-
-    return (
-        any(marker in text for marker in serious_goal_markers)
-        or any(marker in text for marker in reflective_markers)
-        or any(marker in lowered for marker in english_goal_markers)
-    )
+    serious_goal_markers = ["goal", "plan", "career", "project", "architecture", "\ubaa9\ud45c", "\uacc4\ud68d", "\ud504\ub85c\uc81d\ud2b8", "\uad6c\uc870"]
+    reflective_markers = ["think", "analyze", "why", "how", "\uc0dd\uac01", "\ubd84\uc11d", "\uc65c", "\uc5b4\ub5bb\uac8c"]
+    return any(marker in text for marker in serious_goal_markers + reflective_markers)
 
 
 def _is_short_affirmation(user_input: str):
-    text = str(user_input or "").strip().lower()
-    if not text:
-        return False
-    normalized = re.sub(r"[\s!~.]+", "", text)
-    affirmations = {"응", "그래", "넥", "ㅇㅋ", "오케이", "좋아", "ㅇㅇ", "ok", "okay", "yes", "yep"}
-    return normalized in affirmations
+    return _is_short_affirmation_impl(user_input)
 
 
 def _working_memory_expects_continuation(working_memory: dict):
-    if not isinstance(working_memory, dict):
-        return False
-    dialogue_state = working_memory.get("dialogue_state", {})
-    if not isinstance(dialogue_state, dict):
-        return False
-    return bool(dialogue_state.get("continuation_expected"))
+    return _working_memory_expects_continuation_impl(working_memory)
 
 
 def _working_memory_active_task(working_memory: dict):
-    if not isinstance(working_memory, dict):
-        return ""
-    dialogue_state = working_memory.get("dialogue_state", {})
-    if not isinstance(dialogue_state, dict):
-        return ""
-    return str(dialogue_state.get("active_task") or "").strip()
+    return _working_memory_active_task_impl(working_memory)
+
+
+def _working_memory_active_offer(working_memory: dict):
+    return _working_memory_active_offer_impl(working_memory)
+
+
+def _working_memory_pending_dialogue_act(working_memory: dict):
+    return _working_memory_pending_dialogue_act_impl(working_memory)
+
+
+def _pending_dialogue_act_anchor(working_memory: dict):
+    return _pending_dialogue_act_anchor_impl(working_memory)
+
+
+def _pending_dialogue_act_accepts_current_turn(user_input: str, working_memory: dict):
+    return _pending_dialogue_act_accepts_current_turn_impl(user_input, working_memory)
+
+
+def _working_memory_writer_packet(working_memory: dict):
+    return _working_memory_writer_packet_impl(working_memory)
+
+
+def _llm_short_term_context_material(working_memory: dict):
+    return _llm_short_term_context_material_impl(
+        working_memory,
+        looks_like_internal_phase3_seed=_looks_like_internal_phase3_seed,
+        compact_user_facing_summary=_compact_user_facing_summary,
+    )
+
+
+def _short_term_context_response_strategy(user_input: str, working_memory: dict):
+    return _short_term_context_response_strategy_impl(
+        user_input,
+        working_memory,
+        looks_like_internal_phase3_seed=_looks_like_internal_phase3_seed,
+        compact_user_facing_summary=_compact_user_facing_summary,
+    )
+
+
+def _short_term_context_strategy_is_usable(response_strategy: dict | None, user_input: str, working_memory: dict):
+    return _short_term_context_strategy_is_usable_impl(
+        response_strategy,
+        user_input,
+        working_memory,
+        looks_like_internal_phase3_seed=_looks_like_internal_phase3_seed,
+        compact_user_facing_summary=_compact_user_facing_summary,
+        has_meaningful_delivery_seed=_has_meaningful_delivery_seed,
+    )
+
+
+def _working_memory_direct_answer_seed(working_memory: dict):
+    return _working_memory_direct_answer_seed_impl(working_memory)
+
+
+def _working_memory_pending_question(working_memory: dict):
+    return _working_memory_pending_question_impl(working_memory)
+
+
+def _working_memory_last_assistant_answer(working_memory: dict):
+    return _working_memory_last_assistant_answer_impl(working_memory)
+
+
+def _recent_context_last_assistant_turn(recent_context: str):
+    return _recent_context_last_assistant_turn_impl(
+        recent_context,
+        extract_recent_raw_turns_from_context=_extract_recent_raw_turns_from_context,
+    )
+
+
+def _previous_delivery_anchor(user_input: str, recent_context: str, working_memory: dict):
+    return _previous_delivery_anchor_impl(
+        user_input,
+        recent_context,
+        working_memory,
+        extract_recent_raw_turns_from_context=_extract_recent_raw_turns_from_context,
+        is_generic_continue_seed=_is_generic_continue_seed,
+    )
+
+
+def _is_retry_previous_answer_turn(user_input: str, recent_context: str, working_memory: dict):
+    return _is_retry_previous_answer_turn_impl(
+        user_input,
+        recent_context,
+        working_memory,
+        extract_artifact_hint=_extract_artifact_hint,
+        extract_explicit_search_keyword=_extract_explicit_search_keyword,
+        is_assistant_investigation_request_turn=_is_assistant_investigation_request_turn,
+        is_recent_dialogue_review_turn=_is_recent_dialogue_review_turn,
+        is_directive_or_correction_turn=_shared_is_directive_or_correction_turn,
+        extract_recent_raw_turns_from_context=_extract_recent_raw_turns_from_context,
+        is_generic_continue_seed=_is_generic_continue_seed,
+    )
+
+
+def _working_memory_temporal_context(working_memory: dict):
+    return _working_memory_temporal_context_impl(working_memory)
+
+
+def _temporal_context_prefers_current_input(working_memory: dict):
+    return _temporal_context_prefers_current_input_impl(working_memory)
+
+
+def _temporal_context_allows_carry_over(working_memory: dict):
+    return _temporal_context_allows_carry_over_impl(working_memory)
+
+
+def _recent_hint_budget_from_working_memory(working_memory: dict):
+    return _recent_hint_budget_from_working_memory_impl(working_memory)
+
+
+def _raw_grounding_strength(raw_read_report: dict):
+    if not isinstance(raw_read_report, dict):
+        return "thin"
+    items = raw_read_report.get("items", [])
+    if not isinstance(items, list):
+        return "thin"
+    grounded_count = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        observed_fact = str(item.get("observed_fact") or "").strip()
+        excerpt = str(item.get("excerpt") or "").strip()
+        if observed_fact or excerpt:
+            grounded_count += 1
+    if grounded_count >= 3:
+        return "strong"
+    if grounded_count >= 1:
+        return "medium"
+    return "thin"
 
 
 
@@ -2054,35 +3582,16 @@ def _extract_artifact_hint(text: str):
     raw = str(text or "").strip()
     if not raw:
         return ""
-
     path_match = re.search(r'([A-Za-z]:\\[^"\']+\.(?:pptx|txt|md|json|py|docx))', raw, re.IGNORECASE)
     if path_match:
         return path_match.group(1).strip()
-
     file_match = re.search(r'([^\n\r"\']+\.(?:pptx|txt|md|json|py|docx))', raw, re.IGNORECASE)
     if file_match:
         return file_match.group(1).strip()
-
     lowered = raw.lower()
-    compact = re.sub(r"\s+", "", lowered)
-    if "anima부가자료" in compact or "아니마부가자료" in compact:
-        return "ANIMA 부가자료"
-    if "anima기획서" in compact or "아니마기획서" in compact:
-        return "ANIMA 기획서"
-    if "부가자료" in raw:
-        pattern = re.search(r"([A-Za-z가-힣0-9 _-]{0,80}부가자료)", raw)
-        if pattern:
-            return pattern.group(1).strip()
-        return "부가자료"
-    if "기획서" in raw:
-        pattern = re.search(r"([A-Za-z가-힣0-9 _-]{0,80}기획서)", raw)
-        if pattern:
-            return pattern.group(1).strip()
-        return "기획서"
-
-    pattern = re.search(r"([A-Za-z가-힣0-9 _-]{1,80}(?:문서|자료|슬라이드))(?:\s|$)", raw)
-    return pattern.group(1).strip() if pattern else ""
-
+    if "anima" in lowered and ("artifact" in lowered or "document" in lowered):
+        return "ANIMA artifact"
+    return ""
 
 
 def _is_artifact_review_turn(user_input: str):
@@ -2092,21 +3601,9 @@ def _is_artifact_review_turn(user_input: str):
     artifact_hint = _extract_artifact_hint(text)
     if not artifact_hint:
         return False
-    review_markers = [
-        "읽어봐",
-        "읽고",
-        "봐봐",
-        "확인해봐",
-        "검토해봐",
-        "다 나와있잖아",
-        "자료에 있잖아",
-        "부가자료에 있잖아",
-        "기획서에 있잖아",
-        "문서에 있잖아",
-        "슬라이드에 있잖아",
-    ]
     lowered = text.lower()
-    return any(marker in text for marker in review_markers) or any(ext in lowered for ext in [".pptx", ".txt", ".md", ".docx", ".json"])
+    review_markers = ["read", "review", "check", "inspect", "analyze", "\uc77d\uc5b4", "\uac80\ud1a0", "\ubd84\uc11d"]
+    return any(marker in lowered for marker in review_markers) or any(ext in lowered for ext in [".pptx", ".txt", ".md", ".docx", ".json", ".py"])
 
 
 
@@ -2118,261 +3615,520 @@ def _artifact_instruction_from_text(text: str):
 
 
 
-def _should_default_to_memory_search(user_input: str, analysis_data: dict, working_memory: dict):
-    text = str(user_input or "").strip()
-    if not text:
-        return False
-
-    if _is_recent_dialogue_review_turn(text):
-        return False
-    if _is_artifact_review_turn(text):
-        return False
-    if _is_initiative_request_turn(text):
-        return False
-    if _is_internal_reasoning_turn(text):
-        return False
-
-    explicit_memory_markers = [
-        "과거", "기억", "기록", "이전 대화", "지난 대화", "이전 채팅", "다시 찾아", "꺼내봐", "예전에", "그때 말한",
-    ]
-    if any(marker in text for marker in explicit_memory_markers):
-        return True
-
-    evidence_state = working_memory.get("evidence_state", {}) if isinstance(working_memory, dict) else {}
-    source_ids = evidence_state.get("active_source_ids", []) if isinstance(evidence_state, dict) else []
-    if source_ids and any(marker in text for marker in ["그때", "그 얘기", "그 부분", "이전 것"]):
-        return True
-
-    return False
-
-
 def _recent_context_invites_continuation(recent_context: str):
-    text = str(recent_context or "").strip()
-    if not text:
-        return False
-
-    tail = text[-500:]
-    markers = [
-        "어떤 점", "자세히", "말해줘", "설명해줘", "알려줘", "궁금해", "확인해줘",
-    ]
-    if any(marker in tail for marker in markers):
-        return True
-
-    question_like_markers = ["?", "무엇", "왜", "어떻게", "어디"]
-    return any(marker in tail for marker in question_like_markers)
+    return _recent_context_invites_continuation_impl(recent_context)
 
 
 def _is_followup_ack_turn(user_input: str, recent_context: str):
-    return _is_short_affirmation(user_input) and _recent_context_invites_continuation(recent_context)
+    return _is_followup_ack_turn_impl(user_input, recent_context)
 
 
-def _is_initiative_request_turn(user_input: str):
-    text = str(user_input or "").strip()
-    lowered = text.lower()
-    if not text:
-        return False
-    if _is_assistant_question_request_turn(text):
-        return True
-    initiative_markers = [
-        "네가 알아봐", "네가 알아보라고", "네가 생각해", "네가 생각하라고", "네가 정해", "네가 판단해", "그냥 해봐", "네가 제안해", "직접 해봐",
-    ]
-    english_markers = ["you decide", "you think", "don't ask", "just propose", "figure it out"]
-    return any(marker in text for marker in initiative_markers) or any(marker in lowered for marker in english_markers)
-
-
-def _is_assistant_question_request_turn(user_input: str):
-    text = str(user_input or "").strip()
-    lowered = text.lower()
-    if not text:
-        return False
-    question_request_markers = [
-        "질문해봐", "질문해 봐", "네가 질문해", "네가 질문하라고", "네가 물어봐", "한 번 물어봐", "한 가지 물어봐", "너가 질문해",
-    ]
-    english_markers = ["ask me a question", "you ask", "ask first", "ask one question"]
-    return any(marker in text for marker in question_request_markers) or any(marker in lowered for marker in english_markers)
-
-
-def _followup_context_expected(user_input: str, recent_context: str, working_memory: dict):
-    return _is_short_affirmation(user_input) and (
-        _recent_context_invites_continuation(recent_context)
-        or _working_memory_expects_continuation(working_memory)
+def _base_followup_context_expected(user_input: str, recent_context: str, working_memory: dict):
+    return _base_followup_context_expected_impl(
+        user_input,
+        recent_context,
+        working_memory,
+        is_followup_offer_acceptance_turn=_is_followup_offer_acceptance_turn,
     )
 
 
-def _is_directive_or_correction_turn(user_input: str):
-    text = str(user_input or "").strip()
-    lowered = text.lower()
-    if not text:
-        return False
-    if _is_assistant_question_request_turn(text):
-        return True
-    directive_markers = [
-        "다시 봐", "직접 확인해봐", "네가 확인해봐", "네가 알아봐", "이상해", "틀렸어", "아니라고", "똑바로", "직접 읽어봐", "그거 말고",
-    ]
-    english_markers = ["you decide", "you think", "don't ask", "just propose", "check it yourself"]
-    return any(marker in text for marker in directive_markers) or any(marker in lowered for marker in english_markers)
+def _casual_social_user_facing_seed(user_input: str):
+    return _casual_social_user_facing_seed_impl(user_input)
 
 
 def _social_turn_strategy(user_input: str):
+    return _social_turn_strategy_impl(user_input)
+
+
+def _user_turn_targets_assistant_reply(text: str, recent_context: str = ""):
+    return _user_turn_targets_assistant_reply_impl(
+        text,
+        recent_context,
+        extract_recent_raw_turns_from_context=_extract_recent_raw_turns_from_context,
+    )
+
+def _is_social_repair_turn(user_input: str, recent_context: str = "", working_memory: dict | None = None):
+    return _is_social_repair_turn_impl(
+        user_input,
+        recent_context,
+        working_memory,
+        extract_artifact_hint=_extract_artifact_hint,
+        is_directive_or_correction_turn=_shared_is_directive_or_correction_turn,
+        extract_recent_raw_turns_from_context=_extract_recent_raw_turns_from_context,
+    )
+
+
+def _social_repair_strategy(user_input: str, recent_context: str, working_memory: dict):
+    return _social_repair_strategy_impl(
+        user_input,
+        recent_context,
+        working_memory,
+        extract_recent_raw_turns_from_context=_extract_recent_raw_turns_from_context,
+    )
+
+def _ensure_social_turn_strategist_delivery(
+    strategist_payload: dict,
+    user_input: str,
+    recent_context: str,
+    working_memory: dict,
+    analysis_data: dict,
+):
+    return _ensure_social_turn_strategist_delivery_impl(
+        strategist_payload,
+        user_input,
+        recent_context,
+        working_memory,
+        analysis_data,
+        normalize_action_plan=_normalize_action_plan,
+        normalize_short_string_list=_normalize_short_string_list,
+        has_meaningful_strategy=_has_meaningful_strategy,
+        has_meaningful_delivery_seed=_has_meaningful_delivery_seed,
+        looks_like_generic_non_answer_text=_looks_like_generic_non_answer_text,
+        looks_like_user_parroting_report=_looks_like_user_parroting_report,
+        is_social_repair_turn=_is_social_repair_turn,
+        is_casual_social_turn=_is_casual_social_turn,
+        is_persona_preference_turn=_is_persona_preference_turn,
+        is_retry_previous_answer_turn=_is_retry_previous_answer_turn,
+        is_directive_or_correction_turn=_is_directive_or_correction_turn,
+        recent_context_last_assistant_turn=_recent_context_last_assistant_turn,
+        social_repair_strategy=_social_repair_strategy,
+        persona_preference_strategy=_persona_preference_strategy,
+        social_turn_strategy=_social_turn_strategy,
+    )
+
+
+def _ensure_direct_delivery_response_strategy(
+    strategist_payload: dict,
+    user_input: str,
+    recent_context: str,
+    working_memory: dict,
+    analysis_data: dict,
+    start_gate_review: dict | None = None,
+):
+    return _ensure_direct_delivery_response_strategy_impl(
+        strategist_payload,
+        user_input,
+        recent_context,
+        working_memory,
+        analysis_data,
+        start_gate_review,
+        has_meaningful_strategy=_has_meaningful_strategy,
+        has_usable_response_seed=_has_usable_response_seed,
+        normalize_action_plan=_normalize_action_plan,
+        normalize_operation_plan=_normalize_operation_plan,
+        empty_operation_plan=_empty_operation_plan,
+        derive_operation_plan=_derive_operation_plan,
+        fallback_response_strategy=_fallback_response_strategy,
+        minimal_direct_dialogue_strategy=_minimal_direct_dialogue_strategy,
+        normalize_short_string_list=_normalize_short_string_list,
+    )
+
+
+def _is_creative_story_request_turn(user_input: str) -> bool:
+    text = unicodedata.normalize("NFKC", str(user_input or "").strip()).lower()
+    if not text:
+        return False
+    if _extract_artifact_hint(text):
+        return False
+    if _extract_explicit_search_keyword(text):
+        return False
+    if _is_assistant_investigation_request_turn(text):
+        return False
+
+    markers = [
+        "\uc7ac\ubc0c\ub294 \uc598\uae30",
+        "\uc7ac\ubc0c\ub294 \uc774\uc57c\uae30",
+        "\uc6c3\uae34 \uc598\uae30",
+        "\uc6c3\uae34 \uc774\uc57c\uae30",
+        "\ub18d\ub2f4 \ud574\uc918",
+        "\ub18d\ub2f4 \ud574\ubd10",
+        "\uc37c \ud480\uc5b4\uc918",
+        "\uc37c \ud480\uc5b4\ubd10",
+        "funny story",
+        "tell me something funny",
+        "tell me a joke",
+    ]
+    if any(marker in text for marker in markers):
+        return True
+
+    return bool(re.search(r"(joke|story|anecdote)", text)) and any(
+        token in text for token in ["funny", "short", "tell", "make me laugh"]
+    )
+
+
+def _creative_story_strategy(user_input: str, working_memory: dict):
+    strategy = _base_minimal_direct_dialogue_strategy(user_input, working_memory)
+    strategy["reply_mode"] = "generic_dialogue"
+    strategy["delivery_freedom_mode"] = "supportive_free"
+    strategy["answer_goal"] = "Let phase 3 answer the current creative request directly."
+    return strategy
+
+
+def _is_self_analysis_request_turn(user_input: str) -> bool:
+    text = unicodedata.normalize("NFKC", str(user_input or "").strip()).lower()
+    if not text:
+        return False
+    self_markers = ["me", "myself", "about me", "\ub098", "\ub0b4", "\ub098\ub294"]
+    analysis_markers = ["analyze", "analysis", "personality", "tendency", "\ubd84\uc11d", "\uc131\ud5a5", "\uc131\uaca9"]
+    capability_markers = ["can you", "possible", "\uac00\ub2a5", "\ud560 \uc218"]
+    return any(marker in text for marker in self_markers) and any(marker in text for marker in analysis_markers) and not any(marker in text for marker in capability_markers)
+
+
+def _working_memory_user_model_delta(working_memory: dict):
+    if not isinstance(working_memory, dict):
+        return {}
+    user_model = working_memory.get("user_model_delta", {})
+    return user_model if isinstance(user_model, dict) else {}
+
+
+def _self_analysis_grounded_clues(user_input: str, recent_context: str, working_memory: dict, limit: int = 4):
+    clues = []
     user_text = str(user_input or "").strip()
+    recent_turns = _extract_recent_raw_turns_from_context(recent_context, max_turns=8)
+    recent_user_turns = [
+        str(turn.get("content") or "").strip()
+        for turn in recent_turns
+        if isinstance(turn, dict) and str(turn.get("role") or "").strip().lower() == "user" and str(turn.get("content") or "").strip()
+    ]
+    user_model = _working_memory_user_model_delta(working_memory)
+    observed_preferences = [str(item).strip() for item in user_model.get("observed_preferences", []) if str(item).strip()]
+    friction_points = [str(item).strip() for item in user_model.get("friction_points", []) if str(item).strip()]
+    if observed_preferences:
+        clues.append("Working memory includes visible user preferences: " + " / ".join(observed_preferences[:2]))
+    if friction_points:
+        clues.append("Recent friction points: " + " / ".join(friction_points[:2]))
+    if recent_user_turns:
+        clues.append("Recent user context: " + _compact_user_facing_summary(" / ".join(recent_user_turns[-3:]), 220))
+    if user_text:
+        clues.append("Current self-analysis request: " + _compact_user_facing_summary(user_text, 160))
+    return _normalize_short_string_list(clues, limit=limit)
+
+
+def _self_analysis_snapshot_strategy(user_input: str, recent_context: str, working_memory: dict):
+    user_text = str(user_input or "").strip()
+    clues = _self_analysis_grounded_clues(user_input, recent_context, working_memory, limit=4)
+    must_include = [f"Current self-analysis request: {user_text}"] if user_text else []
+    must_include.extend(clues)
+    clue_seed = " / ".join(clues[:3])
     return {
-        "reply_mode": "casual_reaction",
-        "answer_goal": "Respond naturally to a light social turn.",
-        "tone_strategy": "Stay warm, light, and brief.",
-        "evidence_brief": f"Current user turn: {user_text}",
-        "reasoning_brief": "No deep analysis is needed for this turn.",
-        "direct_answer_seed": "React naturally and keep the conversation moving.",
-        "must_include_facts": [f"Current user turn: {user_text}"],
+        "reply_mode": "grounded_answer",
+        "delivery_freedom_mode": "grounded",
+        "answer_goal": "Give a bounded, conversation-based snapshot of the user visible patterns right now.",
+        "tone_strategy": "Warm, direct, and specific without pretending to know hidden private facts.",
+        "evidence_brief": " / ".join(clues),
+        "reasoning_brief": "Use only patterns visible in the current conversation and working memory.",
+        "direct_answer_seed": f"From the visible conversation, the useful clues are: {clue_seed}",
+        "must_include_facts": must_include,
         "must_avoid_claims": [
-            "Do not invent hidden intent.",
-            "Do not expose internal workflow.",
-            "Do not turn a light turn into a heavy analysis.",
+            "Do not claim access to hidden private data.",
+            "Do not give a deep psychological diagnosis.",
+            "Do not ask the user to narrow the scope before giving a first-pass snapshot.",
         ],
         "answer_outline": [
-            "Respond naturally.",
-            "Add one short follow-up only if it helps.",
+            "State that this is conversation-based.",
+            "Name the grounded visible patterns.",
+            "Keep uncertainty honest.",
         ],
-        "uncertainty_policy": "If the turn is too vague, keep the reply simple instead of bluffing.",
+        "uncertainty_policy": "This is a first-pass read from visible conversation only.",
     }
+
+
+def _capability_boundary_strategy(user_input: str, recent_context: str, working_memory: dict):
+    user_text = str(user_input or "").strip()
+    recent_turns = _extract_recent_raw_turns_from_context(recent_context, max_turns=6)
+    user_model = _working_memory_user_model_delta(working_memory)
+    evidence_state = working_memory.get("evidence_state", {}) if isinstance(working_memory, dict) else {}
+    if not isinstance(evidence_state, dict):
+        evidence_state = {}
+    active_sources = [str(item).strip() for item in evidence_state.get("active_source_ids", []) if str(item).strip()]
+
+    facts = [
+        "This ANIMA runtime can search configured grounded records, including migrated Neo4j memory and date-specific diary reads, when the planner selects those tools.",
+        "A capability answer is not itself a search; actual diary content requires a concrete search/read request and returned source.",
+        "The assistant cannot access hidden offline private files or accounts outside the configured records.",
+    ]
+    if recent_turns:
+        facts.append(f"{len(recent_turns)} recent raw turns are available for visible dialogue-pattern reading.")
+    if active_sources:
+        facts.append(f"Active grounded sources are available this turn: {' / '.join(active_sources[:2])}.")
+    if user_model.get("observed_preferences"):
+        facts.append("Working memory contains visible preferences or friction points from prior turns.")
+
+    facts = _normalize_short_string_list(facts, limit=4)
+    must_include = list(facts)
+
+    return {
+        "reply_mode": "grounded_answer",
+        "delivery_freedom_mode": "grounded",
+        "answer_goal": "Explain clearly how the assistant knows user information, what sources it can use, and where the boundary is.",
+        "tone_strategy": "Direct, transparent, and calm. Explain the actual boundary without sounding helpless.",
+        "evidence_brief": " / ".join(facts),
+        "reasoning_brief": "This is a capability-boundary question, so the answer should explain what comes from explicit dialogue, working memory, and grounded sources, while denying hidden access.",
+        "direct_answer_seed": "",
+        "must_include_facts": must_include,
+        "must_avoid_claims": [
+            "Do not claim access to hidden private data.",
+            "Do not say diary search is impossible when the configured grounded tools can search migrated diary records.",
+            "Do not use a helpless generic limitation template.",
+            "Do not pretend the boundary question requires a search loop before answering.",
+        ],
+        "answer_outline": [
+            "Explain what information sources are actually available now.",
+            "State the privacy boundary clearly.",
+            "Briefly add what kind of first-pass analysis is possible from those sources.",
+        ],
+        "uncertainty_policy": "Be transparent about the boundary, but still say what is already possible instead of stopping at 'I can't.'",
+    }
+
+
+def _is_self_analysis_detail_followup_turn(user_input: str, recent_context: str, working_memory: dict) -> bool:
+    text = unicodedata.normalize("NFKC", str(user_input or "").strip()).lower()
+    if not text or _is_self_analysis_request_turn(text):
+        return False
+    active_offer = _working_memory_active_offer(working_memory)
+    active_task = _working_memory_active_task(working_memory)
+    recent_assistant = _recent_context_last_assistant_turn(recent_context)
+    anchor_blob = " ".join(
+        part for part in [active_offer, active_task, recent_assistant] if isinstance(part, str) and part.strip()
+    ).lower()
+    if not anchor_blob:
+        return False
+    self_analysis_anchor_markers = ["pattern", "self-analysis", "conversation-based snapshot", "visible patterns", "\ud328\ud134", "\uc790\uae30\ubd84\uc11d"]
+    if not any(marker in anchor_blob for marker in self_analysis_anchor_markers):
+        return False
+    detail_markers = ["detail", "specific", "why", "where", "evidence", "\uad6c\uccb4", "\uc790\uc138", "\uc65c", "\uc5b4\ub514", "\uadfc\uac70"]
+    return any(marker in text for marker in detail_markers)
 
 
 def _followup_ack_strategy(user_input: str, recent_context: str):
-    user_text = str(user_input or "").strip()
-    return {
-        "reply_mode": "continue_previous_offer",
-        "answer_goal": "Continue the immediately preceding thread without repeating the whole setup.",
-        "tone_strategy": "Assume continuity and move the conversation forward smoothly.",
-        "evidence_brief": f"Follow-up acknowledgement: {user_text}",
-        "reasoning_brief": "The user appears to be continuing the previous thread rather than opening a new topic.",
-        "direct_answer_seed": "Pick up the previous thread naturally and move one step forward.",
-        "must_include_facts": [
-            f"Follow-up acknowledgement: {user_text}",
-            "The previous assistant move likely invited continuation.",
-        ],
-        "must_avoid_claims": [
-            "Do not restart the conversation from zero.",
-            "Do not pretend the user supplied brand-new evidence if they did not.",
-            "Do not over-explain context the user already knows.",
-        ],
-        "answer_outline": [
-            "Acknowledge the continuation.",
-            "Advance the prior thread by one useful step.",
-            "Use one precise follow-up only if it is needed.",
-        ],
-        "uncertainty_policy": "If continuity is weak, ask one small clarifying follow-up instead of forcing it.",
-    }
+    del recent_context
+    strategy = _base_minimal_direct_dialogue_strategy(user_input, {})
+    strategy["reply_mode"] = "continue_previous_offer"
+    strategy["delivery_freedom_mode"] = "proposal"
+    strategy["answer_goal"] = "Use short-term context to continue the current conversational thread."
+    return strategy
 
 
-def _initiative_request_strategy(user_input: str, working_memory: dict):
-    user_text = str(user_input or "").strip()
-    active_task = _working_memory_active_task(working_memory)
-    must_include = [f"Current initiative request: {user_text}"]
-    if active_task and active_task != user_text:
-        must_include.append(f"Active task context: {active_task}")
+def _accepted_offer_execution_seed(active_offer: str):
+    return _accepted_offer_execution_seed_impl(active_offer)
 
-    return {
-        "reply_mode": "continue_previous_offer",
-        "answer_goal": "Take initiative and propose the next useful move instead of pushing the decision back to the user.",
-        "tone_strategy": "Sound decisive, grounded, and collaborative.",
-        "evidence_brief": f"The user asked the assistant to take initiative: {user_text}",
-        "reasoning_brief": "The assistant should propose a concrete next move instead of asking vague follow-up questions.",
-        "direct_answer_seed": "Make one concrete proposal or next step on your own, then explain it briefly.",
-        "must_include_facts": must_include,
-        "must_avoid_claims": [
-            "Do not bounce the task back to the user with a vague question.",
-            "Do not pretend the user supplied a detailed plan if they did not.",
-            "Do not leak internal role language.",
-        ],
-        "answer_outline": [
-            "State one concrete initiative.",
-            "Explain why that move fits the current context.",
-            "Ask for confirmation only if truly necessary.",
-        ],
-        "uncertainty_policy": "If context is thin, choose a modest and reversible next step.",
-    }
+
+def _offer_acceptance_strategy(user_input: str, working_memory: dict):
+    return _offer_acceptance_strategy_impl(user_input, working_memory)
+
+
+def _retry_previous_answer_strategy(user_input: str, recent_context: str, working_memory: dict):
+    return _retry_previous_answer_strategy_impl(
+        user_input,
+        recent_context,
+        working_memory,
+        extract_recent_raw_turns_from_context=_extract_recent_raw_turns_from_context,
+        is_generic_continue_seed=_is_generic_continue_seed,
+    )
+
+
+def _is_identity_question_turn(user_input: str) -> bool:
+    text = unicodedata.normalize("NFKC", str(user_input or "").strip()).lower()
+    if not text:
+        return False
+    markers = [
+        "\ub10c \ub204\uad6c",
+        "\ub124 \uc774\ub984",
+        "\uc774\ub984\uc740",
+        "\uc790\uae30\uc18c\uac1c",
+        "who are you",
+        "what is your name",
+        "your name",
+    ]
+    return any(marker in text for marker in markers)
+
+
+def _identity_dialogue_strategy(user_input: str, working_memory: dict):
+    strategy = _base_minimal_direct_dialogue_strategy(user_input, working_memory)
+    strategy["delivery_freedom_mode"] = "grounded"
+    strategy["answer_goal"] = "Answer assistant-identity questions from approved context without claiming memory retrieval."
+    strategy["must_include_facts"] = []
+    return strategy
+
+
+def _is_persona_preference_turn(user_input: str) -> bool:
+    text = unicodedata.normalize("NFKC", str(user_input or "").strip()).lower()
+    if not text:
+        return False
+    if _extract_artifact_hint(text) or _extract_explicit_search_keyword(text):
+        return False
+
+    assistant_markers = [
+        "\ub108",
+        "\ub124\uac00",
+        "\ub2c8\uac00",
+        "\uc1a1\ub828",
+        "you",
+        "assistant",
+    ]
+    hypothetical_markers = [
+        "\uc0ac\ub78c\uc774 \ub41c\ub2e4\uba74",
+        "\uc0ac\ub78c \ub41c\ub2e4\uba74",
+        "\uc778\uac04\uc774 \ub41c\ub2e4\uba74",
+        "\uc778\uac04 \ub41c\ub2e4\uba74",
+        "\uc0ac\ub78c\uc774\ub77c\uba74",
+        "\uc778\uac04\uc774\ub77c\uba74",
+        "\ub41c\ub2e4\uba74",
+        "\ub9cc\uc57d",
+        "if you were human",
+        "if you became human",
+    ]
+    preference_markers = [
+        "\ub418\uace0 \uc2f6",
+        "\ub418\uace0\uc2f6",
+        "\ud574\ubcf4\uace0 \uc2f6",
+        "\ud574\ubcf4\uace0\uc2f6",
+        "\uace0\ub974",
+        "\uc120\ud0dd",
+        "\uc5b4\ub290 \ucabd",
+        "prefer",
+        "would you rather",
+        "want to be",
+    ]
+    persona_markers = [
+        "\ub0a8\uc790",
+        "\uc5ec\uc790",
+        "\uc131\ubcc4",
+        "\ubab8",
+        "\uc721\uccb4",
+        "gender",
+        "male",
+        "female",
+    ]
+    has_assistant_target = any(marker in text for marker in assistant_markers)
+    has_hypothetical = any(marker in text for marker in hypothetical_markers)
+    has_preference = any(marker in text for marker in preference_markers)
+    has_persona_topic = any(marker in text for marker in persona_markers)
+    return has_assistant_target and has_hypothetical and has_preference and has_persona_topic
+
+
+def _persona_preference_strategy(user_input: str, working_memory: dict):
+    strategy = _base_minimal_direct_dialogue_strategy(user_input, working_memory)
+    strategy["reply_mode"] = "generic_dialogue"
+    strategy["delivery_freedom_mode"] = "supportive_free"
+    strategy["answer_goal"] = "Let phase 3 answer the current persona or hypothetical question without scripted preference text."
+    return strategy
+
+
+def _is_emotional_vent_turn(user_input: str, recent_context: str = "", working_memory: dict | None = None):
+    del recent_context, working_memory
+    text = unicodedata.normalize("NFKC", str(user_input or "").strip()).lower()
+    if not text or "?" in text or _is_assistant_question_request_turn(text):
+        return False
+    if _extract_artifact_hint(text) or any(token in text for token in ["search ", "tool_", "schema", "db", "chat log"]):
+        return False
+    vent_markers = ["tired", "angry", "frustrated", "upset", "hurt", "exhausted", "\ud798\ub4e4", "\uc9dc\uc99d", "\ud654\ub098", "\uc18d\uc0c1", "\uace0\ub9bd", "\ub2f5\ub2f5"]
+    return any(marker in text for marker in vent_markers)
+
+
+def _supportive_empathy_strategy(user_input: str, recent_context: str, working_memory: dict):
+    del recent_context
+    strategy = _base_minimal_direct_dialogue_strategy(user_input, working_memory)
+    strategy["delivery_freedom_mode"] = "supportive_free"
+    strategy["answer_goal"] = "Let phase 3 respond naturally to the current user turn without scripted empathy text."
+    return strategy
+
+
+def _base_initiative_request_strategy(user_input: str, working_memory: dict):
+    strategy = _base_minimal_direct_dialogue_strategy(user_input, working_memory)
+    strategy["reply_mode"] = "continue_previous_offer"
+    strategy["delivery_freedom_mode"] = "proposal"
+    strategy["answer_goal"] = "Let phase 3 propose the next useful move from the available context."
+    return strategy
 
 
 def _assistant_question_seed(user_input: str, working_memory: dict):
-    text = str(user_input or "").strip()
-    question_request_markers = ["\uc9c8\ubb38\ud574\ubd10", "\ub124\uac00 \uc9c8\ubb38\ud574", "\ub124\uac00 \ubb3c\uc5b4\ubd10"]
-    goal_markers = ["\ubaa9\ud45c", "\uc6b0\uc2b9", "\uacf5\ubaa8\uc804", "\uacc4\ud68d", "\uc804\ub7b5", "\uae30\ud68d", "\uacbd\ub825"]
-    reflective_markers = ["\uc65c", "\uc5b4\ub5bb\uac8c", "\ubb34\uc5c7", "\ubaa8\uc21c", "\ubd88\uc548", "\ubb38\uc81c"]
-
-    if any(marker in text for marker in question_request_markers):
-        return "Ask one concrete question that helps the user move the conversation forward right now."
-    if any(marker in text for marker in goal_markers):
-        return "Ask the one question that will make the user's goal or success criteria clearer."
-    if any(marker in text for marker in reflective_markers):
-        return "Ask one reflective question that helps the user name the real tension or uncertainty."
-    return "Ask one concrete question that reduces ambiguity and moves the conversation forward."
+    del user_input, working_memory
+    return ""
 
 
-def _answer_not_ready_strategy(user_input: str, war_room: dict):
+def _clean_failure_response_strategy(user_input: str, war_room: dict):
     debt = war_room.get("epistemic_debt", {}) if isinstance(war_room, dict) else {}
     missing_items = debt.get("missing_items", []) if isinstance(debt, dict) else []
-    next_best_action = str(debt.get("next_best_action") or "").strip()
+    if isinstance(missing_items, list):
+        missing_items = [
+            str(item).strip()
+            for item in missing_items
+            if str(item).strip() and not _looks_like_generic_non_answer_text(str(item))
+        ]
+    else:
+        missing_items = []
+    raw_next_best_action = str(debt.get("next_best_action") or "").strip()
+    next_best_action = "" if _looks_like_generic_non_answer_text(raw_next_best_action) else raw_next_best_action
     why_tool_not_used = str(debt.get("why_tool_not_used") or "").strip()
+    if _looks_like_generic_non_answer_text(why_tool_not_used):
+        why_tool_not_used = ""
 
-    must_include = ["현재 답변이 아직 완전히 준비되지 않았음을 투명하게 밝혀야 합니다."]
+    missing_brief = _compact_user_facing_summary(missing_items[0], 180).rstrip(" .??!?") if missing_items else ""
+    next_action_brief = _compact_user_facing_summary(next_best_action, 120) if next_best_action else ""
+
+    must_include = ["State what is confirmed and what remains unconfirmed in natural language."]
     if missing_items:
-        must_include.append(f"가장 중요한 누락 항목: {', '.join(missing_items[:2])}")
+        must_include.append(f"Unconfirmed: {', '.join(_compact_user_facing_summary(item, 90) for item in missing_items[:2])}")
     if next_best_action:
-        must_include.append(f"다음 최선 행동: {next_best_action}")
+        must_include.append(f"Next check direction: {next_action_brief}")
 
-    direct_seed = "아직 깔끔하게 마무리할 수 없으므로, 현재 한계와 다음 최선 단계를 분명히 설명한다."
-    if missing_items and next_best_action:
-        direct_seed = f"가장 큰 누락 항목은 {missing_items[0]}입니다. 가장 분명한 다음 단계는 {next_best_action}입니다."
+    direct_seed = "With the evidence currently available, I cannot settle the whole request yet. I can name the boundary and the next check."
+    if missing_items and next_action_brief:
+        direct_seed = f"With the evidence currently available, I cannot settle this yet. Unconfirmed: {missing_brief}. Next check: {next_action_brief}."
     elif missing_items:
-        direct_seed = f"가장 큰 누락 항목은 {missing_items[0]}이므로, 그 점을 분명히 말해야 합니다."
-    elif next_best_action:
-        direct_seed = f"다음 최선 단계는 {next_best_action}이므로, 그 점을 분명히 말해야 합니다."
+        direct_seed = f"With the evidence currently available, I cannot settle this yet. Unconfirmed: {missing_brief}."
+    elif next_action_brief:
+        direct_seed = f"I cannot settle this yet. The next check should be: {next_action_brief}."
 
     return {
         "reply_mode": "cautious_minimal",
-        "answer_goal": "현재 한계를 솔직하게 밝히고, 가장 분명한 다음 단계를 제안한다.",
-        "tone_strategy": "방어적이지 않게, 차분하고 투명하며 실용적으로 말한다.",
-        "evidence_brief": f"현재 사용자 요청: {str(user_input or '').strip()}",
-        "reasoning_brief": why_tool_not_used or "현재 도구 세트나 근거만으로는 이 문제를 깔끔하게 끝낼 수 없다.",
+        "delivery_freedom_mode": "clean_failure",
+        "answer_goal": "State what can and cannot be confirmed right now, naturally.",
+        "tone_strategy": "Not defensive or report-like; say the practical limit plainly.",
+        "evidence_brief": f"current user request: {str(user_input or '').strip()}",
+        "reasoning_brief": why_tool_not_used or "The currently retrieved evidence cannot safely verify every requested detail.",
         "direct_answer_seed": direct_seed,
         "must_include_facts": must_include,
         "must_avoid_claims": [
-            "답변이 준비되지 않았는데 준비된 척하지 말 것.",
-            "누락된 근거를 숨기지 말 것.",
-            "사용자에게 내부 전문용어를 그대로 쏟아내지 말 것.",
+            "Do not expose garbled or internal fallback wording.",
+            "Do not expose internal next_best_action or judge wording.",
+            "Do not pretend missing evidence is confirmed.",
         ],
         "answer_outline": [
-            "현재 한계를 분명히 말한다.",
-            "가장 중요한 누락 항목을 지목한다.",
-            "다음 최선 행동을 제안한다.",
+            "Name the answerable boundary first.",
+            "Name the unconfirmed part in one sentence.",
+            "Suggest one next check direction if possible.",
         ],
-        "uncertainty_policy": "근거가 약할수록 결핍을 더 구체적으로 밝힌다.",
+        "uncertainty_policy": "The weaker the evidence, the narrower and more concrete the answer should be.",
     }
 
 
 def _ask_user_question_strategy(user_input: str, working_memory: dict):
     active_task = _working_memory_active_task(working_memory)
-    must_include = ["지금은 어시스턴트가 사용자에게 구체적인 질문 한 개를 던져야 합니다."]
+    must_include = ["Ask the user one concrete question right now."]
     if active_task:
-        must_include.append(f"현재 작업 맥락: {active_task}")
+        must_include.append(f"current task context: {active_task}")
 
     return {
         "reply_mode": "ask_user_question_now",
-        "answer_goal": "대화를 즉시 앞으로 밀 수 있는 질문 한 개를 던진다.",
-        "tone_strategy": "자연스럽고, 집중되어 있으며, 구체적으로 묻는다.",
-        "evidence_brief": f"현재 사용자 요청: {str(user_input or '').strip()}",
-        "reasoning_brief": "사용자는 애매한 되묻기가 아니라, 어시스턴트가 다음 질문을 먼저 던지길 원한다.",
-        "direct_answer_seed": _assistant_question_seed(user_input, working_memory),
+        "delivery_freedom_mode": "proposal",
+        "answer_goal": "Ask one question that immediately moves the conversation forward.",
+        "tone_strategy": "Natural, focused, and specific.",
+        "evidence_brief": f"current user request: {str(user_input or '').strip()}",
+        "reasoning_brief": "The user wants the assistant to lead with the next question, not defer vaguely.",
+        "direct_answer_seed": "",
         "must_include_facts": must_include,
         "must_avoid_claims": [
-            "무슨 질문을 원하냐고 다시 떠넘기지 말 것.",
-            "핵심 질문을 두 개 이상 던지지 말 것.",
-            "질문을 내부 역할 설명으로 바꾸지 말 것.",
+            "Do not bounce the choice of question back to the user.",
+            "Do not ask more than one core question.",
+            "Do not replace the question with role explanation.",
         ],
         "answer_outline": [
-            "구체적인 질문 한 개를 던진다.",
-            "지금 대화 흐름에 붙어 있게 묻는다.",
+            "Ask one concrete question.",
+            "Tie it to the current conversation flow.",
         ],
-        "uncertainty_policy": "맥락이 얇으면 넓은 질문 대신 가장 작은 유효 질문 하나를 고른다.",
+        "uncertainty_policy": "If context is thin, choose the smallest useful question.",
     }
 
 
@@ -2382,15 +4138,40 @@ def _normalize_search_keyword(text: str):
     if _extract_artifact_hint(cleaned):
         return ""
     cleaned = re.sub(
-        r"(이전 답변|이전 대화|최근 대화|지금까지의 대화|직접 확인해봐|다시 읽어봐|읽고 판단해|네가 알아보라고)",
+        r"(previous answer|previous conversation|recent conversation|read again|check again)",
         " ",
         cleaned,
     )
-    cleaned = re.sub(r"(찾아봐|알아봐|확인해봐|검토해봐|말해봐)$", " ", cleaned)
+    cleaned = re.sub(r"(look up|search|check|tell me)$", " ", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.-")
     if len(cleaned) > 60:
         return ""
-    return cleaned or "최근"
+    return cleaned or "recent"
+
+
+def _looks_like_fake_tool_or_meta_string(text: str):
+    normalized = unicodedata.normalize("NFKC", str(text or "").strip())
+    if not normalized:
+        return False
+
+    lowered = normalized.lower()
+    if lowered.startswith("tool_") and "(" not in lowered:
+        return True
+
+    meta_markers = [
+        "tool_call_for_",
+        "clarification_prompt",
+        "goal lock:",
+        "achieved findings:",
+        "next frontier:",
+        "next steps:",
+        "instruction=",
+        "operation contract",
+        "response_strategy",
+        "current_step_goal",
+        "query_variant",
+    ]
+    return any(marker in lowered for marker in meta_markers)
 
 
 def _normalize_suggested_instruction(suggestion: str):
@@ -2398,6 +4179,9 @@ def _normalize_suggested_instruction(suggestion: str):
         return ""
 
     suggestion = str(suggestion).strip()
+    if _looks_like_fake_tool_or_meta_string(suggestion):
+        return ""
+
     exact = _extract_exact_tool_call(suggestion)
     if exact:
         return exact
@@ -2415,10 +4199,9 @@ def _normalize_suggested_instruction(suggestion: str):
     if any(token in lowered for token in ["schema", "db"]) or any(token in suggestion for token in ["\uc2a4\ud0a4\ub9c8", "\ub370\uc774\ud130\ubca0\uc774\uc2a4"]):
         return 'tool_scan_db_schema(dummy_keyword="database schema")'
 
-    keyword = _normalize_search_keyword(suggestion)
-    if not keyword:
-        return ""
-    return f'tool_search_memory(keyword={json.dumps(keyword, ensure_ascii=False)})'
+    # Thin-controller mode: do not turn arbitrary planner/auditor prose such as
+    # "plan_more" into a memory search. Tool calls must be explicit.
+    return ""
 
 def _build_direct_tool_message(instruction: str):
     if not instruction:
@@ -2472,11 +4255,7 @@ def _build_direct_tool_message(instruction: str):
     )
 
 def _stable_action_signature(tool_name: str, tool_args: dict):
-    try:
-        serialized_args = json.dumps(tool_args, ensure_ascii=False, sort_keys=True, default=str)
-    except TypeError:
-        serialized_args = str(tool_args)
-    return f"{tool_name}:{serialized_args}"
+    return _stable_action_signature_impl(tool_name, tool_args)
 
 def _has_meaningful_strategy(strategy_data: dict):
     if not isinstance(strategy_data, dict) or not strategy_data:
@@ -2495,16 +4274,18 @@ def _has_meaningful_strategy(strategy_data: dict):
 def _anchor_terms(*texts):
     terms = set()
     for text in texts:
-        for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", str(text or "")):
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}|[가-힣]{2,}", str(text or "")):
             terms.add(token.lower())
     return terms
 
 def _decision_uses_unanchored_topic(decision: dict, user_input: str, analysis_data: dict):
     if not isinstance(decision, dict):
         return False
+    instruction = str(decision.get("instruction") or "").strip()
+    if instruction in {"tool_pass_to_phase_3", "tool_pass_to_phase_3()", "tool_call_119_rescue", "tool_call_119_rescue()"}:
+        return False
     candidate_texts = [
-        decision.get("memo", ""),
-        decision.get("instruction", ""),
+        instruction,
         json.dumps(decision.get("tool_args", {}), ensure_ascii=False),
     ]
     candidate_terms = _anchor_terms(*candidate_texts)
@@ -2536,892 +4317,1062 @@ def _soft_reasoning_budget_limit(reasoning_budget: int):
     return base_budget, base_budget + 1
 
 
-def _preferred_decision_from_analysis(
-    analysis_data: dict,
-    loop_count: int,
-    user_input: str = "",
-    working_memory: dict | None = None,
-    reasoning_budget: int = 1,
+def _normalize_progress_markers(markers: dict | None):
+    return _normalize_progress_markers_impl(markers)
+
+
+def _signature_digest(payload):
+    return _signature_digest_impl(payload)
+
+
+def _raw_progress_signature(raw_read_report: dict):
+    return _raw_progress_signature_impl(raw_read_report)
+
+
+def _analysis_progress_signature(analysis_data: dict):
+    return _analysis_progress_signature_impl(analysis_data)
+
+
+def _strategy_progress_signature(strategist_output: dict):
+    return _strategy_progress_signature_impl(strategist_output)
+
+
+def _normalize_execution_trace(trace: dict | None):
+    return _normalize_execution_trace_impl(trace)
+
+
+def _empty_tool_carryover_state():
+    return _empty_tool_carryover_state_impl()
+
+
+def _normalize_tool_carryover_state(carryover: dict | None):
+    return _normalize_tool_carryover_state_impl(carryover)
+
+
+def _source_id_looks_scrollable(source_id: str):
+    return _source_id_looks_scrollable_impl(source_id)
+
+def _text_mentions_gemini_chat(text: str):
+    normalized = unicodedata.normalize("NFKC", str(text or "")).lower()
+    markers = [
+        "gemini",
+        "geminichat",
+        "\uc81c\ubbf8\ub098\uc774",
+        "\uc81c\ubbf8\ub098\uc774\ub300\ud654",
+        "\uc81c\ubbf8\ub098\uc774 \ucc44\ud305",
+    ]
+    return any(marker in normalized for marker in markers)
+
+
+def _source_ids_from_working_memory(working_memory: dict | None):
+    return _source_ids_from_working_memory_impl(working_memory)
+
+
+def _tool_carryover_from_working_memory(working_memory: dict | None):
+    return _tool_carryover_from_working_memory_impl(working_memory)
+
+
+def _tool_carryover_from_state(state: dict | None):
+    return _tool_carryover_from_state_impl(state)
+
+
+def _extract_source_ids_from_tool_result(result_str: str, exact_dates: list | None = None):
+    return _extract_source_ids_from_tool_result_impl(result_str, exact_dates)
+
+
+def _tool_query_from_args(tool_name: str, tool_args: dict | None):
+    return _tool_query_from_args_impl(tool_name, tool_args)
+
+
+def _update_tool_carryover_after_tool(
+    state: dict | None,
+    current_carryover: dict | None,
+    tool_name: str,
+    tool_args: dict | None,
+    result_str: str,
+    exact_dates: list | None = None,
 ):
+    return _update_tool_carryover_after_tool_impl(
+        state,
+        current_carryover,
+        tool_name,
+        tool_args,
+        result_str,
+        exact_dates,
+    )
+
+
+def _tool_carryover_anchor_id(state_or_working_memory: dict | None):
+    return _tool_carryover_anchor_id_impl(state_or_working_memory)
+
+def _looks_like_scroll_followup_turn(user_input: str):
+    text = unicodedata.normalize("NFKC", str(user_input or "").strip()).lower()
+    if not text:
+        return False
+    scroll_markers = ["scroll", "nearby", "around", "before", "after", "\uc2a4\ud06c\ub864", "\uc8fc\ubcc0", "\uadfc\ucc98"]
+    anchor_markers = ["that result", "that record", "target_id", "\uadf8 \uacb0\uacfc", "\uadf8 \uae30\ub85d", "\ubc29\uae08"]
+    return any(marker in text for marker in scroll_markers) and (
+        any(marker in text for marker in anchor_markers)
+        or bool(re.search(r"\d{4}[-./]\d{1,2}[-./]\d{1,2}", text))
+    )
+
+
+def _scroll_direction_from_user_input(user_input: str):
+    text = unicodedata.normalize("NFKC", str(user_input or "").strip()).lower()
+    if any(marker in text for marker in ["both", "around", "nearby", "\uc8fc\ubcc0", "\uadfc\ucc98"]):
+        return "both"
+    if any(marker in text for marker in ["past", "before", "previous", "\uc774\uc804", "\uacfc\uac70"]):
+        return "past"
+    if any(marker in text for marker in ["future", "after", "next", "\ub2e4\uc74c", "\uc774\ud6c4"]):
+        return "future"
+    return "both"
+
+
+def _scroll_tool_candidate_from_state(user_input: str, state: dict | None):
+    if not _looks_like_scroll_followup_turn(user_input):
+        return None
+    anchor_id = _tool_carryover_anchor_id(state)
+    if not anchor_id:
+        return None
+    return {
+        "tool_name": "tool_scroll_chat_log",
+        "tool_args": {
+            "target_id": anchor_id,
+            "direction": _scroll_direction_from_user_input(user_input),
+            "limit": 20,
+        },
+        "memo": "ToolCarryoverState found an anchored source id, so scroll the same time-axis neighborhood instead of starting a new keyword search.",
+    }
+
+
+def _gemini_scroll_candidate_from_state(state: dict | None, memo: str = ""):
+    state = state if isinstance(state, dict) else {}
+    carryover = _tool_carryover_from_state(state)
+    if str(carryover.get("last_tool") or "").strip() == "tool_scroll_chat_log":
+        return None
+
+    text_parts = [
+        str(state.get("search_results") or ""),
+        str(carryover.get("last_result_summary") or ""),
+        str(carryover.get("last_query") or ""),
+    ]
+    raw_read_report = state.get("raw_read_report", {})
+    if isinstance(raw_read_report, dict):
+        text_parts.append(str(raw_read_report.get("source_summary") or ""))
+        for item in raw_read_report.get("items", []) or []:
+            if not isinstance(item, dict):
+                continue
+            text_parts.append(str(item.get("source_type") or ""))
+            text_parts.append(str(item.get("source_id") or ""))
+            text_parts.append(str(item.get("excerpt") or item.get("observed_fact") or ""))
+
+    if not _text_mentions_gemini_chat("\n".join(text_parts)):
+        return None
+
+    anchor_id = (
+        str(carryover.get("origin_source_id") or "").strip()
+        or str(carryover.get("last_target_id") or "").strip()
+        or next((src for src in carryover.get("source_ids", []) if _source_id_looks_scrollable(src)), "")
+    )
+    if not anchor_id:
+        return None
+
+    args = {"target_id": anchor_id, "direction": "both", "limit": 20}
+    executed_actions = state.get("executed_actions", [])
+    if not isinstance(executed_actions, list):
+        executed_actions = []
+    if _stable_action_signature("tool_scroll_chat_log", args) in executed_actions:
+        return None
+
+    return _make_auditor_decision(
+        "call_tool",
+        memo=memo or (
+            "A Gemini chat search hit is often fragmented, so scroll around the hit before treating it as irrelevant."
+        ),
+        tool_name="tool_scroll_chat_log",
+        tool_args=args,
+    )
+
+
+def _analysis_needs_context_scroll(analysis_data: dict | None):
+    if not isinstance(analysis_data, dict) or not analysis_data:
+        return False
     status = str(analysis_data.get("investigation_status") or "").upper()
-    situational_brief = str(analysis_data.get("situational_brief") or "").strip()
-    budget_limit, soft_limit = _soft_reasoning_budget_limit(reasoning_budget)
-    recent_review = _is_recent_dialogue_review_turn(user_input)
+    if status in {"INCOMPLETE", "EXPANSION_REQUIRED"}:
+        return True
+    if bool(analysis_data.get("can_answer_user_goal") is False):
+        return True
+    return _analysis_reports_relevance_gap(analysis_data)
 
-    if status == "COMPLETED":
-        memo = situational_brief or "Phase 2 judged the case complete enough for delivery."
-        return _make_auditor_decision("phase_3", memo=memo)
 
-    if status == "EXPANSION_REQUIRED":
-        tool_candidate = _tool_candidate_for_case(user_input, analysis_data, working_memory)
-        if tool_candidate:
-            return _make_auditor_decision(
-                "call_tool",
-                memo=situational_brief or str(tool_candidate.get("memo") or "A suitable tool candidate was found for the unresolved gap."),
-                tool_name=str(tool_candidate.get("tool_name") or ""),
-                tool_args=tool_candidate.get("tool_args", {}),
-            )
-
-        if loop_count <= soft_limit or recent_review:
-            over_budget_note = "The soft reasoning budget was reached, but the case can still continue because the graph-level hard stop remains available."
-            memo = situational_brief or (over_budget_note if loop_count >= budget_limit else "The case still needs one more planning or review step before a confident answer.")
-            return _make_auditor_decision("plan_more", memo=memo)
-
-        return _make_auditor_decision(
-            "answer_not_ready",
-            memo=situational_brief or "The gap is still unresolved, so the assistant should explain the limit instead of bluffing.",
-        )
-
-    if status == "INCOMPLETE":
-        tool_candidate = _tool_candidate_for_case(user_input, analysis_data, working_memory)
-        if tool_candidate and (loop_count <= soft_limit or recent_review):
-            return _make_auditor_decision(
-                "call_tool",
-                memo=situational_brief or str(tool_candidate.get("memo") or "A tool candidate may recover the missing evidence."),
-                tool_name=str(tool_candidate.get("tool_name") or ""),
-                tool_args=tool_candidate.get("tool_args", {}),
-            )
-        if loop_count <= soft_limit or recent_review:
-            memo = situational_brief or "The evidence is still incomplete, so the war room should continue before final delivery."
-            return _make_auditor_decision("plan_more", memo=memo)
-        return _make_auditor_decision(
-            "answer_not_ready",
-            memo=situational_brief or "The evidence is still incomplete, so the assistant should surface the missing pieces clearly.",
-        )
-
+def _autonomous_scroll_candidate_from_state(state: dict | None, analysis_data: dict | None, memo: str = ""):
+    """Carryover scroll never outranks the current user goal."""
     return None
 
+def _enforce_autonomous_scroll_replan_directive(analysis_dict: dict, state: dict | None, raw_read_report: dict):
+    if not isinstance(analysis_dict, dict):
+        return analysis_dict
+    temp_state = dict(state or {})
+    temp_state["raw_read_report"] = raw_read_report if isinstance(raw_read_report, dict) else {}
+    temp_state["analysis_report"] = analysis_dict
+    candidate = _autonomous_scroll_candidate_from_state(
+        temp_state,
+        analysis_dict,
+        memo="2b judged the current hit insufficient; next strategy should inspect the carried source neighborhood.",
+    )
+    if not candidate:
+        return analysis_dict
 
-def _preferred_decision_from_verdict(
-    reasoning_board: dict,
-    analysis_data: dict,
-    loop_count: int,
-    user_input: str = "",
-    working_memory: dict | None = None,
-    reasoning_budget: int = 1,
+    args = candidate.get("tool_args", {}) if isinstance(candidate.get("tool_args"), dict) else {}
+    target_id = str(args.get("target_id") or "").strip()
+    direction = str(args.get("direction") or "both").strip()
+    limit = str(args.get("limit") or 20).strip()
+    directive = (
+        "The current FieldMemo candidates did not directly fill the goal slot, but a scrollable source id is available. "
+        f"Next, read the source neighborhood with tool_scroll_chat_log(target_id={target_id!r}, "
+        f"direction={direction!r}, limit={limit}) rather than widening the keyword search."
+    )
+    previous = str(analysis_dict.get("replan_directive_for_strategist") or "").strip()
+    analysis_dict["replan_directive_for_strategist"] = directive if not previous else f"{previous}\n{directive}"
+    if str(analysis_dict.get("investigation_status") or "").upper() == "COMPLETED" and not _analysis_has_answer_relevant_evidence(analysis_dict):
+        analysis_dict["investigation_status"] = "EXPANSION_REQUIRED"
+    return analysis_dict
+
+
+def _operation_contract_from_action_plan(action_plan: dict | None):
+    return _operation_contract_from_action_plan_impl(action_plan)
+
+
+def _derive_operation_contract(
+    user_input: str,
+    action_plan: dict | None,
+    response_strategy: dict | None = None,
+    analysis_data: dict | None = None,
 ):
-    if not isinstance(reasoning_board, dict):
-        return None
+    normalized_action_plan = _normalize_action_plan(action_plan if isinstance(action_plan, dict) else {})
+    existing = _normalize_operation_contract(normalized_action_plan.get("operation_contract", {}))
+    if existing.get("operation_kind") != "unspecified":
+        return existing
 
-    verdict = reasoning_board.get("verdict_board", {})
-    if not isinstance(verdict, dict) or not verdict:
-        return None
+    response_strategy = response_strategy if isinstance(response_strategy, dict) else {}
+    analysis_data = analysis_data if isinstance(analysis_data, dict) else {}
+    required_tool = str(normalized_action_plan.get("required_tool") or "").strip()
+    query_variant = _tool_query_from_instruction(required_tool) if required_tool else ""
+    target_scope = ""
+    novelty_requirement = "If this pass repeats the same tool or source, change the focus or target scope."
+    del user_input
 
-    answer_now = bool(verdict.get("answer_now"))
-    requires_search = bool(verdict.get("requires_search"))
-    judge_notes = verdict.get("judge_notes", []) if isinstance(verdict.get("judge_notes"), list) else []
-    final_answer_brief = str(verdict.get("final_answer_brief") or "").strip()
-    approved_fact_ids = verdict.get("approved_fact_ids", []) if isinstance(verdict.get("approved_fact_ids"), list) else []
-    approved_pair_ids = verdict.get("approved_pair_ids", []) if isinstance(verdict.get("approved_pair_ids"), list) else []
+    if "tool_read_artifact" in required_tool:
+        operation_kind = "read_same_source_deeper"
+        target_scope = "artifact_review"
+    elif "tool_scroll_chat_log" in required_tool:
+        operation_kind = "read_same_source_deeper"
+        target_scope = "anchored_chat_log_scroll"
+        novelty_requirement = "Use ToolCarryoverState's source id as the time-axis origin and read a different neighborhood than the previous pass."
+    elif "tool_read_full_diary" in required_tool:
+        operation_kind = "review_personal_history"
+        target_scope = "past_self_history"
+    elif "tool_search_memory" in required_tool or "tool_search_field_memos" in required_tool:
+        operation_kind = "search_new_source"
+        target_scope = "memory_search"
+    elif "tool_scan_db_schema" in required_tool:
+        operation_kind = "search_new_source"
+        target_scope = "database_schema"
+    elif _has_meaningful_strategy(response_strategy):
+        operation_kind = "deliver_now"
+        target_scope = "direct_answer"
+        novelty_requirement = "Do not bounce the user back with the same generic safety line."
+    elif str((analysis_data or {}).get("investigation_status") or "").upper() == "COMPLETED":
+        operation_kind = "deliver_now"
+        target_scope = "grounded_delivery"
+    else:
+        operation_kind = "unspecified"
 
-    situational_brief = str((analysis_data or {}).get("situational_brief") or "").strip()
-    budget_limit, soft_limit = _soft_reasoning_budget_limit(reasoning_budget)
-    recent_review = _is_recent_dialogue_review_turn(user_input)
-
-    memo_parts = []
-    if situational_brief:
-        memo_parts.append(situational_brief)
-    memo_parts.extend(str(note).strip() for note in judge_notes if str(note).strip())
-    if final_answer_brief:
-        memo_parts.append(f"Answer brief: {final_answer_brief}")
-    memo = " ".join(_dedupe_keep_order(memo_parts)).strip()
-
-    if answer_now or approved_fact_ids or approved_pair_ids:
-        return _make_auditor_decision(
-            "phase_3",
-            memo=memo or "The verdict board approved enough material for phase 3 delivery.",
-        )
-
-    if requires_search:
-        tool_candidate = _tool_candidate_for_case(user_input, analysis_data, working_memory)
-        if tool_candidate:
-            return _make_auditor_decision(
-                "call_tool",
-                memo=memo or str(tool_candidate.get("memo") or "The verdict board still has an unresolved gap with a usable tool candidate."),
-                tool_name=str(tool_candidate.get("tool_name") or ""),
-                tool_args=tool_candidate.get("tool_args", {}),
-            )
-
-        if loop_count <= soft_limit or recent_review:
-            over_budget_note = "The soft reasoning budget was reached, but the case can still plan further because the graph-level hard stop remains available."
-            return _make_auditor_decision(
-                "plan_more",
-                memo=memo or (over_budget_note if loop_count >= budget_limit else "The verdict board still needs one more planning step before delivery."),
-            )
-
-        return _make_auditor_decision(
-            "answer_not_ready",
-            memo=memo or "The verdict board still lacks enough material, so the assistant should explain the limit instead of forcing an answer.",
-        )
-
-    if not answer_now and not approved_fact_ids and not approved_pair_ids:
-        if loop_count <= soft_limit or recent_review:
-            return _make_auditor_decision(
-                "plan_more",
-                memo=memo or "The verdict board is still too thin, so one more planning loop is safer than immediate delivery.",
-            )
-        return _make_auditor_decision(
-            "answer_not_ready",
-            memo=memo or "The verdict board is still too thin for safe delivery.",
-        )
-
-    return None
+    return _normalize_operation_contract({
+        "operation_kind": operation_kind,
+        "target_scope": target_scope,
+        "query_variant": query_variant,
+        "novelty_requirement": novelty_requirement if operation_kind != "unspecified" else "",
+    })
 
 
-def _preferred_decision_from_strategist(
+def _operation_contract_signature(operation_contract: dict | None):
+    return _operation_contract_signature_impl(operation_contract)
+
+
+def _execution_trace_signature(execution_trace: dict | None):
+    return _execution_trace_signature_impl(execution_trace)
+
+
+def _with_execution_trace_contract(execution_trace: dict | None, operation_contract: dict | None):
+    return _with_execution_trace_contract_impl(execution_trace, operation_contract)
+
+
+def _same_tool_call_as_execution(decision: dict | None, execution_trace: dict | None):
+    return _same_tool_call_as_execution_impl(decision, execution_trace)
+
+def _advance_progress_markers(
+    markers: dict | None,
+    state: AnimaState,
+    analysis_data: dict,
+    strategist_output: dict,
+    stage: str,
+):
+    return _advance_progress_markers_impl(
+        markers,
+        state,
+        analysis_data,
+        strategist_output,
+        stage,
+    )
+
+
+def _analysis_refresh_signature(analysis_data: dict):
+    return _analysis_refresh_signature_impl(analysis_data)
+
+
+def _analysis_refresh_allowed(progress_markers: dict | None, analysis_data: dict):
+    return _analysis_refresh_allowed_impl(progress_markers, analysis_data)
+
+
+def _mark_analysis_refresh(progress_markers: dict | None, analysis_data: dict):
+    return _mark_analysis_refresh_impl(progress_markers, analysis_data)
+
+
+def _apply_progress_contract(
+    decision: dict | None,
+    *,
+    stalled_repeats: int,
+    same_operation_repeats: int,
+    user_input: str,
+    analysis_data: dict,
+    strategist_output: dict,
+    working_memory: dict,
+    execution_trace: dict | None = None,
+):
+    return _apply_progress_contract_impl(
+        decision,
+        stalled_repeats=stalled_repeats,
+        same_operation_repeats=same_operation_repeats,
+        user_input=user_input,
+        analysis_data=analysis_data,
+        strategist_output=strategist_output,
+        working_memory=working_memory,
+        execution_trace=execution_trace,
+    )
+
+
+def _merge_strategy_audits(*audits: dict):
+    return _merge_strategy_audits_impl(*audits)
+
+
+def _build_strategy_arbitration_audit(
+    state: AnimaState,
     strategist_output: dict,
     analysis_data: dict,
-    loop_count: int,
-    reasoning_budget: int = 1,
 ):
+    return _build_strategy_arbitration_audit_impl(state, strategist_output, analysis_data)
+
+def _decision_from_strategy_arbitration_audit(
+    audit: dict,
+    *,
+    loop_count: int,
+    reasoning_budget: int,
+):
+    return _decision_from_strategy_arbitration_audit_impl(
+        audit,
+        loop_count=loop_count,
+        reasoning_budget=reasoning_budget,
+    )
+
+def _strategist_needs_refresh_from_analysis(strategist_output: dict, analysis_data: dict):
+    if not isinstance(analysis_data, dict) or not analysis_data:
+        return False
     if not isinstance(strategist_output, dict) or not strategist_output:
-        return None
+        return True
+
+    status = str((analysis_data or {}).get("investigation_status") or "").upper()
+    if status != "COMPLETED":
+        return False
+
+    grounded_facts = _grounded_findings_from_analysis(analysis_data)
+    if not grounded_facts:
+        return False
 
     action_plan = _normalize_action_plan(strategist_output.get("action_plan", {}))
-    case_theory = str(strategist_output.get("case_theory") or "").strip()
     response_strategy = strategist_output.get("response_strategy", {})
     if not isinstance(response_strategy, dict):
         response_strategy = {}
+    goal_lock = _normalize_goal_lock(strategist_output.get("goal_lock", {}))
+    achieved_findings = _normalize_short_string_list(strategist_output.get("achieved_findings", []), limit=3)
+    delivery_readiness = _normalize_delivery_readiness(strategist_output.get("delivery_readiness", ""))
 
-    budget_limit, soft_limit = _soft_reasoning_budget_limit(reasoning_budget)
-    step_goal = str(action_plan.get("current_step_goal") or "").strip()
-    required_tool = str(action_plan.get("required_tool") or "").strip()
-    next_steps = action_plan.get("next_steps_forecast", []) if isinstance(action_plan.get("next_steps_forecast"), list) else []
-    memo_parts = [part for part in [case_theory, step_goal] if part]
-    if next_steps:
-        memo_parts.append(f"Next steps: {' / '.join(str(step).strip() for step in next_steps if str(step).strip())}")
-    memo = " ".join(_dedupe_keep_order(memo_parts)).strip()
+    if _goal_lock_prefers_delivery_on_completed_findings(goal_lock) and not action_plan.get("required_tool"):
+        return False
 
-    if required_tool:
-        return _decision_from_instruction(
-            required_tool,
-            is_satisfied=False,
-            memo=memo or "The strategist requested one exact tool action before any final answer.",
-        )
+    if not achieved_findings:
+        return True
+    if delivery_readiness != "deliver_now" and not action_plan.get("required_tool"):
+        return True
+    if not _has_meaningful_strategy(response_strategy) and action_plan.get("operation_contract", {}).get("operation_kind") != "deliver_now":
+        return True
+    return False
 
-    if _has_meaningful_strategy(response_strategy):
+
+def _valid_strategist_tool_request(tool_request: dict | None):
+    return _valid_strategist_tool_request_impl(
+        tool_request,
+        allowed_tool_names={tool.name for tool in available_tools},
+        repair_search_tool_request=_repair_search_tool_request,
+    )
+
+
+def _tool_request_payload_from_instruction(required_tool: str, rationale: str = ""):
+    return _tool_request_payload_from_instruction_impl(
+        required_tool,
+        rationale=rationale,
+        build_direct_tool_message=_build_direct_tool_message,
+        valid_strategist_tool_request=_valid_strategist_tool_request,
+    )
+
+
+def _ensure_tool_request_in_strategist_payload(strategist_payload: dict):
+    return _ensure_tool_request_in_strategist_payload_impl(
+        strategist_payload,
+        valid_strategist_tool_request=_valid_strategist_tool_request,
+        normalize_action_plan=_normalize_action_plan,
+        tool_request_payload_from_instruction=_tool_request_payload_from_instruction,
+    )
+
+
+def _decision_from_strategist_tool_contract(strategist_output: dict, analysis_data: dict | None = None):
+    return _decision_from_strategist_tool_contract_impl(
+        strategist_output,
+        analysis_data,
+        ensure_tool_request_in_strategist_payload=_ensure_tool_request_in_strategist_payload,
+        valid_strategist_tool_request=_valid_strategist_tool_request,
+        analysis_has_answer_relevant_evidence=_analysis_has_answer_relevant_evidence,
+        make_auditor_decision=_make_auditor_decision,
+    )
+
+
+def _clean_strategist_search_fragment(fragment: str):
+    text = unicodedata.normalize("NFKC", str(fragment or "").strip())
+    if not text:
+        return ""
+    text = text.strip(" \t\r\n\"'`.,!?()[]{}<>")
+    text = re.sub(r"^\s*(?:please|just|once|search|find|look up)\s+", "", text, flags=re.IGNORECASE).strip()
+    text = re.split(r"\s*(?:then|and then|result|results|tell me|explain|\uacb0\uacfc|\ub9d0\ud574|\uc54c\ub824)\b", text, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    text = re.sub(r"\s+", " ", text).strip(" \"'`.,!?()[]{}<>")
+    if not text or len(text) > 90:
+        return ""
+    if _looks_like_fake_tool_or_meta_string(text):
+        return ""
+    return text
+
+def _search_query_is_overbroad_or_instruction(query: str):
+    text = unicodedata.normalize("NFKC", str(query or "").strip()).lower()
+    if not text:
+        return True
+    if is_memory_state_disclosure_turn(text):
+        return True
+    if len(text) > 80:
+        return True
+    bad_markers = [
+        "analyze", "explain", "tell me", "search for", "tool_",
+        "current user turn", "respond to", "phase_", "answer_not_ready",
+    ]
+    return any(marker in text for marker in bad_markers)
+
+
+def _repair_search_tool_request(tool_name: str, tool_args: dict | None, fallback_text: str = ""):
+    normalized_tool_name = str(tool_name or "").strip()
+    if normalized_tool_name not in {"tool_search_memory", "tool_search_field_memos"}:
+        return None
+
+    args = tool_args if isinstance(tool_args, dict) else {}
+    arg_name = "query" if normalized_tool_name == "tool_search_field_memos" else "keyword"
+    other_arg_name = "keyword" if arg_name == "query" else "query"
+    raw_query = str(args.get(arg_name) or args.get(other_arg_name) or "").strip()
+    cleaned = _clean_strategist_search_fragment(raw_query)
+    if not cleaned or _search_query_is_overbroad_or_instruction(cleaned):
+        return None
+
+    repaired_args = dict(args)
+    repaired_args[arg_name] = cleaned
+    if normalized_tool_name == "tool_search_field_memos":
+        try:
+            repaired_args["limit"] = int(repaired_args.get("limit", 6) or 6)
+        except (TypeError, ValueError):
+            repaired_args["limit"] = 6
+    return normalized_tool_name, repaired_args
+
+
+def _deterministic_search_keyword_from_user_input(user_input: str):
+    text = unicodedata.normalize("NFKC", str(user_input or "").strip())
+    if not text:
+        return ""
+
+    quote_chars = "\"'`\u201c\u201d\u2018\u2019\u300c\u300d"
+    quoted_candidates = re.findall(rf"[{re.escape(quote_chars)}](.{{1,80}}?)[{re.escape(quote_chars)}]", text)
+    for quoted in reversed(quoted_candidates):
+        cleaned = _clean_strategist_search_fragment(quoted)
+        if cleaned:
+            return cleaned
+
+    search_match = re.search(r"\bSEARCH\s+(.+)", text, flags=re.IGNORECASE)
+    if search_match:
+        cleaned = _clean_strategist_search_fragment(search_match.group(1))
+        if cleaned:
+            return cleaned
+
+    legacy_keyword = _extract_explicit_search_keyword(text)
+    if legacy_keyword:
+        cleaned = _clean_strategist_search_fragment(legacy_keyword)
+        if cleaned:
+            return cleaned
+
+    return ""
+
+
+def _deterministic_search_keywords_from_user_input(user_input: str):
+    text = unicodedata.normalize("NFKC", str(user_input or "").strip())
+    if not text:
+        return []
+
+    candidates = []
+    quoted_candidates = re.findall(r"[\"'`“”‘’「」『』](.{1,80}?)[\"'`“”‘’「」『』]", text)
+    candidates.extend(_clean_strategist_search_fragment(item) for item in quoted_candidates)
+
+    split_parts = re.split(r"\s*(?:or|또는|혹은)\s+", text, flags=re.IGNORECASE)
+    for part in split_parts:
+        keyword = _deterministic_search_keyword_from_user_input(part)
+        if keyword:
+            candidates.append(keyword)
+
+    primary = _deterministic_search_keyword_from_user_input(text)
+    if primary:
+        candidates.insert(0, primary)
+
+    return _dedupe_keep_order(
+        [
+            candidate
+            for candidate in candidates
+            if candidate and not _search_query_is_overbroad_or_instruction(candidate)
+        ]
+    )[:4]
+
+
+def _tool_query_from_instruction(instruction: str):
+    text = str(instruction or "").strip()
+    if not text:
+        return ""
+
+    exact = _extract_exact_tool_call(text) or text
+    for key in ("query", "keyword", "artifact_hint", "target_id"):
+        patterns = [
+            rf"{key}\s*=\s*['\"]([^'\"]{{1,120}})['\"]",
+            rf"['\"]{key}['\"]\s*:\s*['\"]([^'\"]{{1,120}})['\"]",
+        ]
+        for pattern in patterns:
+            matched = re.search(pattern, exact)
+            if matched:
+                cleaned = _clean_strategist_search_fragment(matched.group(1))
+                if cleaned:
+                    return cleaned
+    return ""
+
+
+def _memory_query_stopwords():
+    return {
+        "the", "and", "or", "to", "for", "with", "about", "this", "that",
+        "please", "search", "remember", "recall", "directly", "question",
+        "answer", "user", "assistant", "query", "keyword", "profile",
+        "\ub124\uac00", "\ub0b4\uac00", "\ub098\ub294", "\ub09c", "\ub0b4",
+        "\uadf8\ub54c", "\uadf8\uac8c", "\uadf8\uac83", "\uadf8\uac70",
+        "\uadf8", "\uadf8\ub7f0", "\uadf8\ub7fc", "\uc544\uae4c",
+        "\ubc29\uae08", "\uc774\uc804", "\uc704", "\uc9c1\uc811",
+        "\uc0c1\ud669", "\uc0ac\uac74", "\uc7a5\uba74", "\uae30\uc5b5",
+        "\ud68c\uc0c1", "\ub5a0\uc62c\ub824", "\ub5a0\uc62c\ub824\ubd10",
+        "\ub9d0\ud574", "\ub9d0\ud574\ubd10", "\uc54c\ub824", "\ucc3e\uc544",
+        "\ucc3e\uc544\ubd10", "\uac80\uc0c9", "\uac80\uc0c9\ud574",
+        "\uc9c8\ubb38", "\ub2f5\ubcc0", "\ud574\ubd10", "\ud574",
+        "\ub2f5\ud574", "\ud55c\ub2e4",
+        "\ub2e4\uc2dc", "\uc81c\ub300\ub85c", "\uc544\ub294\ub9cc\ud07c",
+        "\uc5b4\ub5bb\uac8c", "\ud588\uc744\uac70", "\ud588\uc744\uac70\uc57c",
+        "\ud588\uc744", "\uac70\uc57c", "\uacbd\uc6b0", "\ubc14\ud0d5",
+        "\uc804\ubd80", "\uc9c0\uae08", "\ud604\uc7ac", "\ub4f1\uc7a5\uc778\ubb3c",
+        "\uadf8\ub54c\uc758", "\uc0c1\ud669\uc744", "\uc9c1\uc811",
+    }
+
+
+def _strip_korean_search_suffix(token: str):
+    text = str(token or "").strip()
+    suffixes = [
+        "\uc774\uc5c8\ub2e4\uba74", "\uc774\uc5c8\ub2e4", "\uc774\ub77c\uba74",
+        "\uc774\ub77c\uace0", "\uc774\ub77c\ub294", "\uc600\ub2e4\uba74",
+        "\uc600\ub2e4", "\ub77c\uba74", "\ub77c\uace0", "\ub77c\ub294",
+        "\uc5d0\uc11c", "\uc5d0\uac8c", "\uc73c\ub85c", "\ub85c",
+        "\uc640", "\uacfc", "\uc740", "\ub294", "\uc774", "\uac00",
+        "\uc744", "\ub97c", "\uc5d0", "\ub3c4", "\ub9cc", "\uc57c", "\uc544",
+    ]
+    changed = True
+    while changed:
+        changed = False
+        for suffix in suffixes:
+            if len(text) - len(suffix) >= 2 and text.endswith(suffix):
+                text = text[: -len(suffix)].strip()
+                changed = True
+                break
+    return text
+
+
+def _extract_search_anchor_terms_from_text(text: str, max_terms: int = 8):
+    normalized = unicodedata.normalize("NFKC", str(text or "").strip())
+    if not normalized:
+        return []
+
+    stopwords = _memory_query_stopwords()
+    raw_tokens = re.findall(r"[A-Za-z][A-Za-z0-9_\-]{1,24}|[0-9]{2,}|[\uac00-\ud7a3]{2,24}", normalized)
+    terms = []
+    for raw in raw_tokens:
+        token = raw.strip()
+        lowered = token.lower()
+        if lowered in stopwords:
+            continue
+        if re.search(r"[\uac00-\ud7a3]", token):
+            token = _strip_korean_search_suffix(token)
+            lowered = token.lower()
+        if not token or len(token) < 2 or lowered in stopwords:
+            continue
+        if _looks_like_fake_tool_or_meta_string(token):
+            continue
+        terms.append(token)
+    return _dedupe_keep_order(terms)[:max_terms]
+
+
+def _query_from_anchor_terms(terms, max_chars: int = 60):
+    selected = []
+    for term in terms or []:
+        candidate = " ".join(selected + [str(term).strip()])
+        if len(candidate) > max_chars:
+            break
+        selected.append(str(term).strip())
+    query = " ".join(term for term in selected if term).strip()
+    if not query or _search_query_is_overbroad_or_instruction(query):
+        return ""
+    return query
+
+
+def _looks_like_deictic_memory_query(text: str):
+    normalized = unicodedata.normalize("NFKC", str(text or "").strip()).lower()
+    if not normalized:
+        return False
+    compact = re.sub(r"\s+", "", normalized)
+    deictic_markers = [
+        "\uadf8\ub54c", "\uadf8\uc0ac\uac74", "\uadf8\uc0c1\ud669",
+        "\uadf8\uc7a5\uba74", "\uadf8\uac8c", "\uc544\uae4c", "\ubc29\uae08",
+        "\uc774\uc804", "\uc704\uc5d0\uc11c", "that", "previous",
+    ]
+    recall_markers = [
+        "\uae30\uc5b5", "\ud68c\uc0c1", "\ub5a0\uc62c", "\uc0dd\uac01",
+        "\ub9d0\ud574", "\uc54c\ub824", "remember", "recall",
+    ]
+    if not any(marker in compact or marker in normalized for marker in deictic_markers):
+        return False
+    if not any(marker in compact or marker in normalized for marker in recall_markers):
+        return False
+    anchor_terms = _extract_search_anchor_terms_from_text(normalized, max_terms=4)
+    return len(anchor_terms) <= 2
+
+
+def _tool_call_already_executed(decision: dict | None, state: dict | None):
+    if not isinstance(decision, dict):
+        return False
+    tool_name = str(decision.get("tool_name") or "").strip()
+    tool_args = decision.get("tool_args", {}) if isinstance(decision.get("tool_args"), dict) else {}
+    if not tool_name:
+        return False
+    executed_actions = state.get("executed_actions", []) if isinstance(state, dict) else []
+    if not isinstance(executed_actions, list):
+        executed_actions = []
+    signature = _stable_action_signature(tool_name, tool_args)
+    if signature in executed_actions:
+        return True
+    return _same_tool_call_as_execution(decision, state.get("execution_trace", {}) if isinstance(state, dict) else {})
+
+
+def _next_alternative_search_decision(user_input: str, state: dict | None, current_decision: dict | None, memo: str = ""):
+    if not isinstance(current_decision, dict):
+        return None
+    current_tool = str(current_decision.get("tool_name") or "").strip()
+    current_args = current_decision.get("tool_args", {}) if isinstance(current_decision.get("tool_args"), dict) else {}
+    if current_tool != "tool_search_memory":
+        return None
+
+    current_keyword = str(current_args.get("keyword") or current_args.get("query") or "").strip()
+    executed_actions = state.get("executed_actions", []) if isinstance(state, dict) else []
+    if not isinstance(executed_actions, list):
+        executed_actions = []
+
+    for keyword in _deterministic_search_keywords_from_user_input(user_input):
+        if not keyword or keyword == current_keyword:
+            continue
+        args = {"keyword": keyword}
+        if _stable_action_signature("tool_search_memory", args) in executed_actions:
+            continue
         return _make_auditor_decision(
-            "phase_3",
-            memo=memo or "The strategist says the current step is final delivery and provided a usable response strategy.",
+            "call_tool",
+            memo=memo or f"The first search candidate '{current_keyword}' was checked; continue with the user-provided alternative keyword '{keyword}'.",
+            tool_name="tool_search_memory",
+            tool_args=args,
         )
-
-    if step_goal:
-        if loop_count <= soft_limit:
-            return _make_auditor_decision(
-                "plan_more",
-                memo=memo or "The strategist still wants another planning step before delivery.",
-            )
-        return _make_auditor_decision(
-            "answer_not_ready",
-            memo=memo or "The strategist still has an unfinished plan and cannot justify delivery yet.",
-        )
-
     return None
 
 
-# Core/nodes.py (phase_minus_1a strategist section)
+def _turn_requests_relation_or_synthesis(user_input: str):
+    text = unicodedata.normalize("NFKC", str(user_input or "").strip()).lower()
+    markers = [
+        "\uad00\uacc4", "\uc720\ucd94", "\ucd94\ub860", "\ud574\uc11d", "\ud310\ub2e8",
+        "\uc815\uccb4\uc131", "\uc885\ud569", "infer", "relationship", "synthesize", "interpret",
+    ]
+    return any(marker in text for marker in markers)
 
-# ==========================================================
-# [Phase -1a: Strategist / Advocate]
-# ==========================================================
-def _fallback_strategist_output(user_input: str, analysis_data: dict, working_memory: dict, reasoning_board: dict):
+
+def _looks_like_current_turn_personal_fact_share(user_input: str) -> bool:
+    text = unicodedata.normalize("NFKC", str(user_input or "").strip())
+    if not text:
+        return False
+    lowered = text.lower()
+    compact = re.sub(r"\s+", "", lowered)
+
+    first_person_markers = [
+        "\ub0b4\uac00",
+        "\ub098\ub294",
+        "\ub09c",
+        "\ub0b4\uac8c",
+        "\ub098\uc5d0\uac8c",
+        "i ",
+        "i'",
+        "my ",
+    ]
+    if not any(marker in compact or marker in lowered for marker in first_person_markers):
+        return False
+
+    retrieval_markers = [
+        "\uae30\uc5b5",
+        "\uac80\uc0c9",
+        "\ucc3e\uc544",
+        "\ub9d0\ud574\ubd10",
+        "\uc54c\ub824",
+        "\ubd84\uc11d",
+        "\uc720\ucd94",
+        "search",
+        "remember",
+        "recall",
+    ]
+    if any(marker in compact or marker in lowered for marker in retrieval_markers):
+        return False
+
+    disclosure_markers = [
+        "\ud588\uac70\ub4e0",
+        "\ud588\uc5b4",
+        "\ud588\ub2e4",
+        "\ud574\ubd24",
+        "\ub118\uac8c",
+        "\uc2dc\uac04",
+        "\uc88b\uc544",
+        "\uc2eb\uc5b4",
+        "\ubcf4\uace0",
+        "\ubcf4\uba74",
+        "played",
+        "hours",
+        "like",
+        "love",
+        "hate",
+    ]
+    return bool(re.search(r"\d", text) or any(marker in compact or marker in lowered for marker in disclosure_markers))
+
+
+def _looks_like_current_turn_memory_story_share(user_input: str) -> bool:
+    text = unicodedata.normalize("NFKC", str(user_input or "").strip())
+    if not text or "?" in text:
+        return False
+    lowered = text.lower()
+    request_markers = ["remember", "recall", "search", "find", "\uae30\uc5b5\ud574", "\ucc3e\uc544", "\uac80\uc0c9"]
+    if any(marker in lowered for marker in request_markers):
+        return False
+    story_markers = ["when i", "back then", "as a kid", "\uc5b4\ub9b4", "\uadf8\ub54c", "\uc608\uc804", "\uc720\uce58\uc6d0", "\ud559\uad50"]
+    first_person_markers = [" i ", " my ", "\ub098", "\ub0b4", "\ub0b4\uac00"]
+    has_story_signal = any(marker in lowered for marker in story_markers)
+    has_personal_signal = any(marker in lowered for marker in first_person_markers)
+    return bool((has_story_signal and has_personal_signal) or (len(text) >= 45 and has_personal_signal))
+
+
+def _base_fallback_strategist_output(
+    user_input: str,
+    analysis_data: dict,
+    working_memory: dict,
+    reasoning_board: dict,
+    recent_context: str = "",
+    start_gate_switches: dict | None = None,
+    tool_carryover: dict | None = None,
+):
     status = str((analysis_data or {}).get("investigation_status") or "").upper()
     case_theory = (
         str((analysis_data or {}).get("situational_brief") or "").strip()
         or str((analysis_data or {}).get("analytical_thought") or "").strip()
         or "The case still needs a clearer operating theory before delivery."
     )
-    tool_candidate = _tool_candidate_for_case(user_input, analysis_data, working_memory)
+    start_gate_switches = start_gate_switches if isinstance(start_gate_switches, dict) else {}
+    start_gate_goal_contract = start_gate_switches.get("goal_contract", {})
+    goal_lock = start_gate_goal_contract if isinstance(start_gate_goal_contract, dict) and start_gate_goal_contract else _derive_goal_lock_v2(user_input, {})
+    answer_mode_policy = start_gate_switches.get("answer_mode_policy", {})
+    if not isinstance(answer_mode_policy, dict) or not answer_mode_policy:
+        answer_mode_policy = _answer_mode_policy_for_turn(user_input, recent_context, goal_lock)
+    current_turn_facts = list(start_gate_switches.get("current_turn_facts", []) or [])
+    if not current_turn_facts:
+        current_turn_facts = _extract_current_turn_grounding_facts(user_input, goal_lock)
+    policy_allows_direct = _answer_mode_policy_allows_direct_phase3(answer_mode_policy)
+    question_class = str(answer_mode_policy.get("question_class") or "").strip()
+    capability_boundary_strategy = (
+        _capability_boundary_strategy(user_input, recent_context, working_memory)
+        if question_class == "capability_boundary_question"
+        else None
+    )
+    tool_candidate = None
+    if not policy_allows_direct and not capability_boundary_strategy:
+        tool_candidate = _strategist_tool_request_from_context(
+            user_input,
+            analysis_data,
+            working_memory,
+            recent_context=recent_context,
+            start_gate_switches=start_gate_switches,
+            tool_carryover=tool_carryover,
+        )
     response_strategy = None
+    short_context_strategy = _short_term_context_response_strategy(user_input, working_memory)
 
-    if status in {"EXPANSION_REQUIRED", "INCOMPLETE"} and tool_candidate:
+    if status in {"", "EXPANSION_REQUIRED", "INCOMPLETE"} and tool_candidate:
+        tool_request = {
+            "should_call_tool": True,
+            "tool_name": str(tool_candidate.get("tool_name") or "").strip(),
+            "tool_args": tool_candidate.get("tool_args", {}) if isinstance(tool_candidate.get("tool_args"), dict) else {},
+            "rationale": str(tool_candidate.get("memo") or "Fallback planner selected one exact tool call.").strip(),
+        }
         action_plan = {
-            "current_step_goal": "Collect the next missing fact before attempting a final answer.",
+            "current_step_goal": _tool_candidate_step_goal(goal_lock, tool_candidate),
             "required_tool": _tool_call_to_instruction(
                 str(tool_candidate.get("tool_name") or ""),
                 tool_candidate.get("tool_args", {}),
             ),
             "next_steps_forecast": [
                 "Re-run phase 2 on the newly gathered source.",
-                "Rebuild the advocate position only after the gap is reduced.",
-                "Deliver the final answer when the fact layer is stable.",
+                "Update the goal lock and achieved findings after the gap is reduced.",
+                "Deliver the final answer only when the grounded findings clearly answer the current ask.",
             ],
         }
     else:
-        response_strategy = _fallback_response_strategy(analysis_data)
-        action_plan = {
-            "current_step_goal": "Deliver the final answer using the current approved evidence boundary.",
-            "required_tool": "",
-            "next_steps_forecast": [
+        if capability_boundary_strategy:
+            response_strategy = capability_boundary_strategy
+        elif policy_allows_direct:
+            response_strategy = _response_strategy_from_answer_mode_policy(user_input, answer_mode_policy, current_turn_facts)
+        else:
+            response_strategy = short_context_strategy or _fallback_response_strategy(analysis_data)
+        if capability_boundary_strategy:
+            current_step_goal = "Explain the assistant's current memory/source access boundary without opening a search loop."
+            next_steps = [
+                "Describe what sources can be used when the system actually executes tools.",
+                "State that no search has been performed yet on this turn.",
+                "Invite a concrete query only if the user wants an actual search next.",
+            ]
+        elif short_context_strategy and not policy_allows_direct:
+            current_step_goal = "Answer from LLM-authored short-term context and fulfill any pending conversational obligation."
+            next_steps = [
+                "Use the short-term context as conversational context only.",
+                "Do not reopen a search loop unless the user explicitly asks for retrieval.",
+                "If context is insufficient, ask one concrete clarifying question.",
+            ]
+        else:
+            current_step_goal = _goal_locked_delivery_step_goal(goal_lock)
+            next_steps = [
                 "If the user pushes back, inspect the exact weak point instead of bluffing.",
                 "If a new gap appears, hand the case back to phase 2 for another read.",
-            ],
+            ]
+        action_plan = {
+            "current_step_goal": current_step_goal,
+            "required_tool": "",
+            "next_steps_forecast": next_steps,
         }
+        tool_request = {}
+
+    has_grounded_findings = bool(status == "COMPLETED" and _grounded_findings_from_analysis(analysis_data))
+    short_context_deliverable = bool(short_context_strategy and not tool_candidate)
+    deliverable_now = bool(
+        policy_allows_direct
+        or has_grounded_findings
+        or short_context_deliverable
+        or capability_boundary_strategy
+    )
 
     strategist_output = {
         "case_theory": case_theory,
+        "answer_mode_policy": answer_mode_policy,
+        "operation_plan": _derive_operation_plan(
+            user_input,
+            analysis_data,
+            action_plan,
+            response_strategy if isinstance(response_strategy, dict) else {},
+            working_memory,
+        ),
+        "goal_lock": goal_lock,
+        "convergence_state": "deliverable" if deliverable_now else "gathering",
+        "achieved_findings": _grounded_findings_from_analysis(analysis_data),
+        "delivery_readiness": "deliver_now" if deliverable_now else ("need_one_more_source" if tool_candidate else "need_reframe"),
+        "next_frontier": list(action_plan.get("next_steps_forecast", [])),
         "action_plan": action_plan,
+        "tool_request": tool_request,
         "response_strategy": response_strategy,
+        "war_room_contract": _derive_war_room_operating_contract(
+            user_input,
+            analysis_data,
+            action_plan,
+            response_strategy if isinstance(response_strategy, dict) else {},
+        ),
         "candidate_pairs": [],
     }
+    strategist_output = _sanitize_strategist_goal_fields(
+        strategist_output,
+        user_input,
+        start_gate_switches,
+    )
+    strategist_output = _ensure_tool_request_in_strategist_payload(strategist_output)
     reasoning_board = _apply_strategist_output_to_reasoning_board(reasoning_board, strategist_output)
     return strategist_output, reasoning_board
 
 
-def phase_minus_1a_thinker(state: AnimaState):
-    print("[Phase -1a] 근거를 바탕으로 마스터 플랜을 수립 중...")
-
-    analysis_data = state.get("analysis_report", {})
-    status = str(analysis_data.get("investigation_status") or "").upper()
-    evidences = analysis_data.get("evidences", []) if isinstance(analysis_data, dict) else []
-    reasoning_board = state.get("reasoning_board", {})
-    if not isinstance(reasoning_board, dict) or not reasoning_board:
-        reasoning_board = _build_reasoning_board_from_analysis(state, analysis_data)
-
-    recent_context = state.get("recent_context", "")
-    songryeon_thoughts = state.get("songryeon_thoughts", "")
-    tactical_briefing = state.get("tactical_briefing", "")
-    user_state = state.get("user_state", "")
-    user_char = state.get("user_char", "")
-    bio_status = state.get("biolink_status", "")
-    time_gap = state.get("time_gap", 0)
-    tolerance = state.get("global_tolerance", 1.0)
-    auditor_memo = state.get("self_correction_memo", "")
-    working_memory = state.get("working_memory", {})
-    raw_read_report = state.get("raw_read_report", {})
-    war_room = _normalize_war_room_state(state.get("war_room", {}))
-    analysis_packet = _analysis_packet_for_prompt(analysis_data, include_thought=True)
-    working_memory_packet = _working_memory_packet_for_prompt(working_memory)
-    reasoning_board_packet = _reasoning_board_packet_for_prompt(reasoning_board, approved_only=False)
-    raw_read_packet = _raw_read_report_packet_for_prompt(raw_read_report)
-
-    if not evidences and status in {"", "INCOMPLETE"}:
-        print("  [Phase -1a] 근거가 얇아서 fallback 플래너를 사용합니다.")
-        strategist_output, reasoning_board = _fallback_strategist_output(
-            state["user_input"],
-            analysis_data,
-            working_memory,
-            reasoning_board,
-        )
-        response_strategy = strategist_output.get("response_strategy", {})
-        if not isinstance(response_strategy, dict):
-            response_strategy = {}
-        war_room = _war_room_after_advocate(war_room, analysis_data, strategist_output, reasoning_board)
-        print(f"  [Phase -1a] current_step_goal={strategist_output.get('action_plan', {}).get('current_step_goal', '')[:120]}")
-        print(f"  [Phase -1a] candidate_pairs={len(reasoning_board.get('candidate_pairs', []))}")
-        return {
-            "strategist_output": strategist_output,
-            "response_strategy": response_strategy,
-            "reasoning_board": reasoning_board,
-            "war_room": war_room,
-            "thought_logs": [],
-        }
-
-    sys_prompt = (
-        "당신은 ANIMA의 -1a 마스터 플래너이자 전략가이며 변호사다.\n\n"
-        "2b는 사건을 진단만 했다. 당신은 그 진단을 구체적인 단계별 계획으로 바꿔야 한다.\n"
-        "당신은 엘리트 변호사이자 전략가다. 근거가 부족하면 섣불리 response_strategy를 쓰지 말라.\n"
-        "근거가 약하면 action_plan을 통해 다음에 어떤 정확한 도구를 왜 써야 하는지 계획부터 세워라.\n"
-        "현재 단계가 진짜 최종 답변일 때만 response_strategy를 작성하라.\n"
-        "모든 자유서술 필드는 한국어로 작성하라.\n\n"
-        f"[user_input]\n{state['user_input']}\n\n"
-        f"[recent_context]\n{recent_context}\n\n"
-        f"[user_state]\n{user_state}\n\n"
-        f"[user_char]\n{user_char}\n\n"
-        f"[time_gap]\n{time_gap}\n\n"
-        f"[global_tolerance]\n{tolerance}\n\n"
-        f"[biolink_status]\n{bio_status}\n\n"
-        f"[songryeon_thoughts]\n{songryeon_thoughts}\n\n"
-        f"[tactical_briefing]\n{tactical_briefing}\n\n"
-        f"[working_memory]\n{working_memory_packet}\n\n"
-        f"[reasoning_board]\n{reasoning_board_packet}\n\n"
-        f"[auditor_memo]\n{auditor_memo if auditor_memo else 'N/A'}\n\n"
-        f"[analysis_report]\n{analysis_packet}\n\n"
-        f"[raw_read_report]\n{raw_read_packet}\n\n"
-        "규칙:\n"
-        "1. 2차 evidences와 situational_brief를 출발 근거층으로 취급하라.\n"
-        "2. action_plan.required_tool은 정확한 tool call 또는 빈 문자열이어야 한다.\n"
-        "3. investigation_status가 INCOMPLETE 또는 EXPANSION_REQUIRED면, 성급한 답변보다 계획과 근거 수집을 우선하라.\n"
-        "4. 현재 단계가 최종 답변이 아니면 response_strategy는 null이어도 된다.\n"
-        "5. candidate reasoning pair는 반드시 기존 fact_id에 결박되어야 한다.\n"
-        "6. paired_fact_digest에는 사실만 넣어라.\n"
-        "7. 해석은 subjective.claim_text에, 불확실성은 subjective.uncertainty_note에 넣어라.\n"
-        "8. 새 candidate pair는 audit_status='pending'으로 시작해야 한다.\n"
-        "9. response_strategy가 있을 때만 must_avoid_claims를 채워라.\n"
-        "10. 최종 라우팅 결정은 하지 마라. 당신의 계획 승인 여부는 -1b가 판단한다.\n"
+def _base_phase_minus_1a_thinker(state: AnimaState):
+    return _run_base_phase_minus_1a_thinker(
+        state,
+        llm=llm,
+        strategist_reasoning_output_schema=StrategistReasoningOutput,
+        build_phase_minus_1a_prompt=build_phase_minus_1a_prompt,
+        build_reasoning_board_from_analysis=_build_reasoning_board_from_analysis,
+        normalize_war_room_state=_normalize_war_room_state,
+        analysis_packet_for_prompt=_analysis_packet_for_prompt,
+        working_memory_packet_for_prompt=_working_memory_packet_for_prompt,
+        reasoning_board_packet_for_prompt=_reasoning_board_packet_for_prompt,
+        raw_read_report_packet_for_prompt=_raw_read_report_packet_for_prompt,
+        war_room_packet_for_prompt=_war_room_packet_for_prompt,
+        answer_mode_policy_from_state=_answer_mode_policy_from_state,
+        answer_mode_policy_packet_for_prompt=_answer_mode_policy_packet_for_prompt,
+        evidence_ledger_for_prompt=evidence_ledger_for_prompt,
+        fallback_strategist_output=_base_fallback_strategist_output,
+        force_findings_first_delivery_strategy=_force_findings_first_delivery_strategy,
+        war_room_after_advocate=_war_room_after_advocate,
+        sanitize_strategist_goal_fields=_sanitize_strategist_goal_fields,
+        ensure_tool_request_in_strategist_payload=_ensure_tool_request_in_strategist_payload,
+        apply_strategist_output_to_reasoning_board=_apply_strategist_output_to_reasoning_board,
+        print_fn=print,
     )
 
-    structured_llm = llm.with_structured_output(StrategistReasoningOutput)
-    try:
-        res = structured_llm.invoke([SystemMessage(content=sys_prompt)])
-        strategist_payload = res.model_dump()
-        response_strategy = strategist_payload.get("response_strategy", {})
-        if not isinstance(response_strategy, dict):
-            response_strategy = {}
-        strategist_payload["response_strategy"] = response_strategy
-        reasoning_board = _apply_strategist_output_to_reasoning_board(reasoning_board, strategist_payload)
-        print(f"  [Phase -1a] current_step_goal={strategist_payload.get('action_plan', {}).get('current_step_goal', '')[:120]}")
-        print(f"  [Phase -1a] candidate_pairs={len(reasoning_board.get('candidate_pairs', []))}")
-    except Exception as e:
-        print(f"[Phase -1a] 구조화 출력 예외: {e}")
-        strategist_payload, reasoning_board = _fallback_strategist_output(
-            state["user_input"],
-            analysis_data,
-            working_memory,
-            reasoning_board,
-        )
-        response_strategy = strategist_payload.get("response_strategy", {})
-        if not isinstance(response_strategy, dict):
-            response_strategy = {}
-
-    war_room = _war_room_after_advocate(war_room, analysis_data, strategist_payload, reasoning_board)
-    return {
-        "strategist_output": strategist_payload,
-        "response_strategy": response_strategy,
-        "reasoning_board": reasoning_board,
-        "war_room": war_room,
-        "thought_logs": [],
-    }
-
-
-def phase_minus_1b_auditor(state: AnimaState):
-    print("[Phase -1b] 현재 턴을 감사 중...")
-
-    user_input = str(state.get("user_input") or "")
-    recent_context = str(state.get("recent_context") or "")
-    analysis_data = state.get("analysis_report", {})
-    if not isinstance(analysis_data, dict):
-        analysis_data = {}
-    has_analysis = bool(analysis_data)
-    working_memory = state.get("working_memory", {})
-    if not isinstance(working_memory, dict):
-        working_memory = {}
-    reasoning_board = state.get("reasoning_board", {})
-    if not isinstance(reasoning_board, dict):
-        reasoning_board = {}
+def _planned_operation_contract_from_state(state: AnimaState):
     strategist_output = state.get("strategist_output", {})
     if not isinstance(strategist_output, dict):
         strategist_output = {}
-    war_room = _normalize_war_room_state(state.get("war_room", {}))
-    loop_count = int(state.get("loop_count", 0) or 0)
-
-    reasoning_plan = state.get("reasoning_plan", {})
-    if not isinstance(reasoning_plan, dict) or not reasoning_plan:
-        reasoning_plan = _plan_reasoning_budget(user_input, recent_context, working_memory)
-    reasoning_budget = int(state.get("reasoning_budget", reasoning_plan.get("budget", 1)) or reasoning_plan.get("budget", 1) or 1)
-    if reasoning_budget < 0:
-        reasoning_budget = 0
-
-    artifact_hint = _extract_artifact_hint(user_input)
-
-    if artifact_hint and not has_analysis and reasoning_plan.get("preferred_path") == "tool_first":
-        memo = "Artifact review request detected."
-        decision = _make_auditor_decision(
-            "call_tool",
-            memo=memo,
-            tool_name="tool_read_artifact",
-            tool_args={"artifact_hint": artifact_hint},
-        )
-        print(f"  [-1b] {memo} | instruction={decision['instruction']}")
-        war_room = _war_room_after_judge(war_room, decision, analysis_data, reasoning_board)
-        return {
-            "auditor_instruction": decision["instruction"],
-            "auditor_decision": decision,
-            "self_correction_memo": memo,
-            "reasoning_board": reasoning_board,
-            "war_room": war_room,
-            "reasoning_budget": reasoning_budget,
-            "reasoning_plan": reasoning_plan,
-        }
-
-    if _followup_context_expected(user_input, recent_context, working_memory):
-        memo = "The current turn looks like a lightweight follow-up that can continue directly in phase 3."
-        decision = _make_auditor_decision("phase_3", memo=memo)
-        print(f"  [-1b] {memo} | instruction={decision['instruction']}")
-        followup_strategy = _followup_ack_strategy(user_input, recent_context)
-        war_room = _war_room_after_judge(war_room, decision, analysis_data, reasoning_board)
-        return {
-            "response_strategy": followup_strategy,
-            "auditor_instruction": decision["instruction"],
-            "auditor_decision": decision,
-            "self_correction_memo": memo,
-            "reasoning_board": reasoning_board,
-            "war_room": war_room,
-            "reasoning_budget": reasoning_budget,
-            "reasoning_plan": reasoning_plan,
-        }
-
-    if _is_assistant_question_request_turn(user_input):
-        memo = "The user wants the assistant to ask one concrete question now."
-        decision = _make_auditor_decision("phase_3", memo=memo)
-        print(f"  [-1b] {memo} | instruction={decision['instruction']}")
-        question_strategy = _ask_user_question_strategy(user_input, working_memory)
-        war_room = _war_room_after_judge(war_room, decision, analysis_data, reasoning_board)
-        return {
-            "response_strategy": question_strategy,
-            "auditor_instruction": decision["instruction"],
-            "auditor_decision": decision,
-            "self_correction_memo": memo,
-            "reasoning_board": reasoning_board,
-            "war_room": war_room,
-            "reasoning_budget": reasoning_budget,
-            "reasoning_plan": reasoning_plan,
-        }
-
-    if not has_analysis and reasoning_plan.get("preferred_path") == "internal_reasoning" and reasoning_budget > 0:
-        memo = str(reasoning_plan.get("rationale") or "The current turn still needs one internal reasoning pass before delivery.").strip()
-        decision = _make_auditor_decision("internal_reasoning", memo=memo)
-        print(f"  [-1b] {memo} | instruction={decision['instruction']}")
-        war_room = _war_room_after_judge(war_room, decision, analysis_data, reasoning_board)
-        return {
-            "auditor_instruction": decision["instruction"],
-            "auditor_decision": decision,
-            "self_correction_memo": memo,
-            "reasoning_board": reasoning_board,
-            "war_room": war_room,
-            "reasoning_budget": reasoning_budget,
-            "reasoning_plan": reasoning_plan,
-        }
-
-    if not has_analysis and reasoning_plan.get("preferred_path") == "direct_answer":
-        memo = str(reasoning_plan.get("rationale") or "The current turn looks answerable without a tool-first path.").strip()
-        decision = _make_auditor_decision("phase_3", memo=memo)
-        response_strategy = {}
-        if _is_initiative_request_turn(user_input):
-            response_strategy = _initiative_request_strategy(user_input, working_memory)
-        response_strategy, _, speaker_review = _prepare_phase3_delivery(
-            user_input=user_input,
-            recent_context=recent_context,
-            working_memory=working_memory,
-            reasoning_board=reasoning_board,
-            analysis_data=analysis_data,
-            response_strategy=response_strategy,
-            search_results=state.get("search_results", ""),
-            loop_count=loop_count,
-        )
-        if speaker_review.get("should_remand") and reasoning_budget > 0:
-            decision = _make_auditor_decision(
-                "internal_reasoning",
-                memo="Phase 3 delivery review says the packet is still too weak, so one more internal loop is safer.",
-            )
-            response_strategy = {}
-        print(f"  [-1b] {decision.get('memo', memo)} | instruction={decision['instruction']}")
-        war_room = _war_room_after_judge(war_room, decision, analysis_data, reasoning_board)
-        return {
-            "response_strategy": response_strategy,
-            "auditor_instruction": decision["instruction"],
-            "auditor_decision": decision,
-            "self_correction_memo": decision.get("memo", memo),
-            "reasoning_board": reasoning_board,
-            "war_room": war_room,
-            "speaker_review": speaker_review,
-            "reasoning_budget": reasoning_budget,
-            "reasoning_plan": reasoning_plan,
-        }
-
-    if has_analysis or reasoning_board.get("candidate_pairs") or reasoning_board.get("fact_cells"):
-        reasoning_board = _audit_reasoning_board(reasoning_board, analysis_data)
-        preferred_strategist = _preferred_decision_from_strategist(
-            strategist_output,
-            analysis_data,
-            loop_count,
-            reasoning_budget=reasoning_budget,
-        )
-        if preferred_strategist:
-            print(f"  [-1b] strategist-plan decision: {preferred_strategist.get('memo', '')} | instruction={preferred_strategist.get('instruction', '')}")
-            war_room = _war_room_after_judge(war_room, preferred_strategist, analysis_data, reasoning_board)
-            response_strategy = strategist_output.get("response_strategy", {})
-            if not isinstance(response_strategy, dict):
-                response_strategy = {}
-            if str(preferred_strategist.get("action") or "").strip() != "phase_3":
-                response_strategy = {}
-            if str(preferred_strategist.get("action") or "").strip() == "answer_not_ready":
-                response_strategy = _answer_not_ready_strategy(user_input, war_room)
-            return {
-                "strategist_output": strategist_output,
-                "response_strategy": response_strategy,
-                "auditor_instruction": preferred_strategist.get("instruction", ""),
-                "auditor_decision": preferred_strategist,
-                "self_correction_memo": preferred_strategist.get("memo", ""),
-                "reasoning_board": reasoning_board,
-                "war_room": war_room,
-                "reasoning_budget": reasoning_budget,
-                "reasoning_plan": reasoning_plan,
-            }
-        preferred_verdict = _preferred_decision_from_verdict(
-            reasoning_board,
-            analysis_data,
-            loop_count,
-            user_input=user_input,
-            working_memory=working_memory,
-            reasoning_budget=reasoning_budget,
-        )
-        if preferred_verdict:
-            print(f"  [-1b] verdict-board decision: {preferred_verdict.get('memo', '')} | instruction={preferred_verdict.get('instruction', '')}")
-            war_room = _war_room_after_judge(war_room, preferred_verdict, analysis_data, reasoning_board)
-            response_strategy = {}
-            if str(preferred_verdict.get("action") or "").strip() == "answer_not_ready":
-                response_strategy = _answer_not_ready_strategy(user_input, war_room)
-            return {
-                "strategist_output": strategist_output,
-                "response_strategy": response_strategy,
-                "auditor_instruction": preferred_verdict.get("instruction", ""),
-                "auditor_decision": preferred_verdict,
-                "self_correction_memo": preferred_verdict.get("memo", ""),
-                "reasoning_board": reasoning_board,
-                "war_room": war_room,
-                "reasoning_budget": reasoning_budget,
-                "reasoning_plan": reasoning_plan,
-            }
-
-    analysis_packet = _analysis_packet_for_prompt(analysis_data, include_thought=True)
-    strategist_packet = _strategist_output_packet_for_prompt(strategist_output)
-    working_memory_packet = _working_memory_packet_for_prompt(working_memory)
-    reasoning_board_packet = _reasoning_board_packet_for_prompt(reasoning_board, approved_only=False)
-    user_state = state.get("user_state", "")
-    user_char = state.get("user_char", "")
-    time_gap = state.get("time_gap", 0)
-    tolerance = state.get("global_tolerance", 1.0)
-    bio_status = state.get("biolink_status", "")
-
-    sys_prompt = (
-        "You are the ANIMA phase -1b auditor and judge.\n\n"
-        "Read the current turn, recent context, working memory, analysis report, and the strategist's plan.\n"
-        "Decide whether the case should go directly to phase 3, continue internal reasoning, call a tool, plan more, or answer_not_ready.\n"
-        "When you reject or hold something, explain why in plain operational language.\n\n"
-        f"[user_input]\n{user_input}\n\n"
-        f"[recent_context]\n{recent_context}\n\n"
-        f"[user_state]\n{user_state}\n\n"
-        f"[user_char]\n{user_char}\n\n"
-        f"[time_gap]\n{time_gap}\n\n"
-        f"[global_tolerance]\n{tolerance}\n\n"
-        f"[biolink_status]\n{bio_status}\n\n"
-        f"[working_memory]\n{working_memory_packet}\n\n"
-        f"[reasoning_budget]\n{reasoning_budget}\n\n"
-        f"[reasoning_plan]\n{json.dumps(reasoning_plan, ensure_ascii=False)}\n\n"
-        f"[reasoning_board]\n{reasoning_board_packet}\n\n"
-        f"[analysis_report]\n{analysis_packet}\n\n"
-        f"[analysis_exists]\n{has_analysis}\n\n"
-        f"[strategist_output]\n{strategist_packet}\n\n"
-        "Rules:\n"
-        "1. instruction_to_0 must be an exact tool call when you choose call_tool.\n"
-        "2. If analysis_exists is false, do not pretend investigation_status exists yet.\n"
-        "3. Prefer current user_input as the main anchor; treat recent_context and working_memory as support, not replacement evidence.\n"
-        "4. Phase 2 diagnoses the case; -1a owns the step-by-step action plan.\n"
-        "5. If strategist_output.action_plan.required_tool is valid, review that plan first before improvising another tool path.\n"
-        "6. COMPLETED may go to phase_3.\n"
-        "7. reasoning_budget is a soft planning guide, not an absolute cutoff.\n"
-        "8. EXPANSION_REQUIRED may still plan more or call a tool even when the soft budget is full, as long as the graph hard stop is still available.\n"
-        "9. If the packet is too weak for safe delivery, prefer plan_more or answer_not_ready over bluffing.\n"
-    )
-
-    decision = None
-    try:
-        structured_llm = llm.with_structured_output(AuditorOutput)
-        res = structured_llm.invoke([SystemMessage(content=sys_prompt)])
-        memo = str(res.rejection_reason or "").strip()
-        preferred = _preferred_decision_from_strategist(
-            strategist_output,
-            analysis_data,
-            loop_count,
-            reasoning_budget=reasoning_budget,
-        )
-        if preferred is None and has_analysis:
-            preferred = _preferred_decision_from_analysis(
-                analysis_data,
-                loop_count,
-                user_input=user_input,
-                working_memory=working_memory,
-                reasoning_budget=reasoning_budget,
-            )
-        if preferred:
-            decision = preferred
-        else:
-            decision = _decision_from_instruction(
-                str(res.instruction_to_0 or "").strip(),
-                is_satisfied=bool(res.is_satisfied),
-                memo=memo,
-            )
-        if decision is None:
-            if artifact_hint:
-                decision = _make_auditor_decision(
-                    "call_tool",
-                    memo=memo or "Artifact review request detected during fallback routing.",
-                    tool_name="tool_read_artifact",
-                    tool_args={"artifact_hint": artifact_hint},
-                )
-            elif _should_default_to_memory_search(user_input, analysis_data, working_memory):
-                keyword = _normalize_search_keyword(user_input)
-                decision = _make_auditor_decision(
-                    "call_tool",
-                    memo=memo or "Fallback routing selected memory search because the turn still looks retrieval-dependent.",
-                    tool_name="tool_search_memory",
-                    tool_args={"keyword": keyword or "recent context"},
-                )
-            else:
-                decision = _make_auditor_decision(
-                    "phase_3",
-                    memo=memo or "Fallback routing selected direct delivery because no stronger tool path was available.",
-                )
-    except Exception as e:
-        print(f"[Phase -1b] structured output exception: {e}")
-        preferred = _preferred_decision_from_strategist(
-            strategist_output,
-            analysis_data,
-            loop_count,
-            reasoning_budget=reasoning_budget,
-        )
-        if preferred is None and has_analysis:
-            preferred = _preferred_decision_from_analysis(
-                analysis_data,
-                loop_count,
-                user_input=user_input,
-                working_memory=working_memory,
-                reasoning_budget=reasoning_budget,
-            )
-        if preferred:
-            decision = preferred
-        else:
-            if artifact_hint:
-                decision = _make_auditor_decision(
-                    "call_tool",
-                    memo="Structured output failed, so fallback routing selected artifact review.",
-                    tool_name="tool_read_artifact",
-                    tool_args={"artifact_hint": artifact_hint},
-                )
-            elif _should_default_to_memory_search(user_input, analysis_data, working_memory):
-                decision = _make_auditor_decision(
-                    "call_tool",
-                    memo="Structured output failed, so fallback routing selected memory search.",
-                    tool_name="tool_search_memory",
-                    tool_args={"keyword": _normalize_search_keyword(user_input) or "recent context"},
-                )
-            else:
-                decision = _make_auditor_decision(
-                    "phase_3",
-                    memo="Structured output failed, so fallback routing selected direct delivery.",
-                )
-
-    if not has_analysis and _decision_uses_unanchored_topic(decision, user_input, analysis_data):
-        if _is_directive_or_correction_turn(user_input) or _is_initiative_request_turn(user_input):
-            decision = _make_auditor_decision(
-                "phase_3",
-                memo="An unrelated stale topic was blocked, so the turn is being re-anchored to the current user request for direct delivery.",
-            )
-        elif _is_artifact_review_turn(user_input):
-            decision = _make_auditor_decision(
-                "call_tool",
-                memo="An unrelated stale topic was blocked, so the turn is being re-anchored to artifact review.",
-                tool_name="tool_read_artifact",
-                tool_args={"artifact_hint": _extract_artifact_hint(user_input)},
-            )
-        elif _should_default_to_memory_search(user_input, analysis_data, working_memory):
-            decision = _make_auditor_decision(
-                "call_tool",
-                memo="An unrelated stale topic was blocked, so the turn is being re-anchored to memory search.",
-                tool_name="tool_search_memory",
-                tool_args={"keyword": _normalize_search_keyword(user_input) or "recent context"},
-            )
-        else:
-            decision = _make_auditor_decision(
-                "phase_3",
-                memo="An unrelated stale topic was blocked, so the turn is being re-anchored to the current user request.",
-            )
-
-    reasoning_board = _audit_reasoning_board(reasoning_board, analysis_data)
-    if reasoning_board.get("candidate_pairs"):
-        approved_pairs = len(reasoning_board.get("final_pair_ids", []))
-        print(f"  [-1b] approved pairs={approved_pairs} / {len(reasoning_board.get('candidate_pairs', []))}")
-
-    war_room = _war_room_after_judge(war_room, decision, analysis_data, reasoning_board)
-    response_strategy = strategist_output.get("response_strategy", {}) if str(decision.get("action") or "").strip() == "phase_3" else {}
+    action_plan = _normalize_action_plan(strategist_output.get("action_plan", {}))
+    response_strategy = strategist_output.get("response_strategy", {})
     if not isinstance(response_strategy, dict):
         response_strategy = {}
-    if str(decision.get("action") or "").strip() == "answer_not_ready":
-        response_strategy = _answer_not_ready_strategy(user_input, war_room)
-    print(f"  [-1b] final decision: {decision.get('memo', '')} | instruction={decision.get('instruction', '')}")
-    return {
-        "strategist_output": strategist_output,
-        "response_strategy": response_strategy,
-        "auditor_instruction": decision.get("instruction", ""),
-        "auditor_decision": decision,
-        "self_correction_memo": decision.get("memo", ""),
-        "reasoning_board": reasoning_board,
-        "war_room": war_room,
-        "reasoning_budget": reasoning_budget,
-        "reasoning_plan": reasoning_plan,
-    }
+    analysis_data = state.get("analysis_report", {})
+    if not isinstance(analysis_data, dict):
+        analysis_data = {}
+    return _derive_operation_contract(
+        str(state.get("user_input") or ""),
+        action_plan,
+        response_strategy=response_strategy,
+        analysis_data=analysis_data,
+    )
+
+
+def _execution_trace_after_supervisor(state: AnimaState, tool_name: str = "", tool_args: dict | None = None):
+    trace = _with_execution_trace_contract(state.get("execution_trace", {}), _planned_operation_contract_from_state(state))
+    trace["executed_tool"] = str(tool_name or "").strip()
+    trace["tool_args_signature"] = _signature_digest(tool_args if isinstance(tool_args, dict) else {})
+    return trace
+
+
+def _execution_trace_after_phase2a(state: AnimaState, raw_read_report: dict):
+    trace = _with_execution_trace_contract(state.get("execution_trace", {}), _planned_operation_contract_from_state(state))
+    raw_read_report = raw_read_report if isinstance(raw_read_report, dict) else {}
+    trace["read_mode"] = str(raw_read_report.get("read_mode") or "").strip()
+    trace["read_focus"] = trace.get("target_scope") or trace.get("operation_kind") or trace.get("read_mode")
+    items = raw_read_report.get("items", [])
+    if not isinstance(items, list):
+        items = []
+    source_ids = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        source_id = str(item.get("source_id") or "").strip()
+        if source_id:
+            source_ids.append(source_id)
+    trace["source_ids"] = _dedupe_keep_order(source_ids)[:8]
+    return trace
+
+
+def _execution_trace_after_phase2b(state: AnimaState, analysis_data: dict):
+    trace = _with_execution_trace_contract(state.get("execution_trace", {}), _planned_operation_contract_from_state(state))
+    analysis_data = analysis_data if isinstance(analysis_data, dict) else {}
+    evidences = analysis_data.get("evidences", [])
+    if not isinstance(evidences, list):
+        evidences = []
+    trace["analysis_focus"] = trace.get("target_scope") or trace.get("operation_kind") or str(analysis_data.get("investigation_status") or "").strip()
+    trace["evidence_count"] = len([
+        item for item in evidences
+        if isinstance(item, dict) and str(item.get("extracted_fact") or "").strip()
+    ])
+    evidence_sources = [
+        str(item.get("source_id") or "").strip()
+        for item in evidences
+        if isinstance(item, dict) and str(item.get("source_id") or "").strip()
+    ]
+    if evidence_sources:
+        trace["source_ids"] = _dedupe_keep_order(list(trace.get("source_ids", [])) + evidence_sources)[:8]
+    return trace
 
 
 def phase_0_supervisor(state: AnimaState):
-    print("[Phase 0] Executing auditor instruction...")
-    llm_with_tools = llm_supervisor.bind_tools(available_tools)
-    auditor_decision = state.get("auditor_decision", {})
-    auditor_instruction = str(state.get("auditor_instruction", "") or "").strip()
-
-    if isinstance(auditor_decision, dict):
-        action = str(auditor_decision.get("action") or "").strip()
-        tool_name = str(auditor_decision.get("tool_name") or "").strip()
-        tool_args = auditor_decision.get("tool_args", {}) if isinstance(auditor_decision.get("tool_args"), dict) else {}
-        if action == "call_tool" and tool_name:
-            print(f"  [Phase 0] direct structured tool execution: {tool_name}")
-            return {
-                "messages": [
-                    AIMessage(
-                        content="",
-                        tool_calls=[{"name": tool_name, "args": tool_args, "id": f"auditor_{tool_name}"}],
-                    )
-                ]
-            }
-        if action == "phase_3":
-            return {"messages": [AIMessage(content="", tool_calls=[{"name": "tool_pass_to_phase_3", "args": {}, "id": "auditor_pass"}])]} 
-        if action == "phase_119":
-            return {"messages": [AIMessage(content="", tool_calls=[{"name": "tool_call_119_rescue", "args": {}, "id": "auditor_119"}])]} 
-
-    direct_message = _build_direct_tool_message(auditor_instruction)
-    if direct_message is not None:
-        print(f"  [Phase 0] direct tool execution from exact instruction: {direct_message.tool_calls[0]['name']}")
-        return {"messages": [direct_message]}
-
-    sys_prompt = (
-        "You are a tool-call extractor.\n"
-        "Convert the auditor instruction below into an exact tool call and do not reply with normal text.\n\n"
-        f"[auditor_instruction]\n{auditor_instruction}\n"
+    return _run_phase_0_supervisor(
+        state,
+        llm_supervisor=llm_supervisor,
+        available_tools=available_tools,
+        planned_operation_contract_from_state=_planned_operation_contract_from_state,
+        execution_trace_after_supervisor=_execution_trace_after_supervisor,
+        build_direct_tool_message=_build_direct_tool_message,
+        build_supervisor_tool_message=_build_supervisor_tool_message,
+        ops_tool_cards=_ops_tool_cards,
+        ops_node_cards=_ops_node_cards,
+        print_fn=print,
     )
 
-    messages = [
-        SystemMessage(content=sys_prompt),
-        HumanMessage(content="Return only a tool call."),
-    ]
-
-    for attempt in range(3):
-        response = llm_with_tools.invoke(messages)
-        if response.tool_calls:
-            print(f"  [Phase 0] 파싱된 도구 호출: {response.tool_calls[0]['name']}")
-            return {"messages": [response]}
-
-        print(f"  [Phase 0] 도구 호출 파싱 실패, 재시도합니다. ({attempt + 1}/3)")
-        messages.append(response)
-        messages.append(HumanMessage(content="Please convert the supervisor instruction into an exact tool call."))
-
-    print("[Phase 0] fallback으로 phase_3 패스를 강제합니다.")
-    forced_msg = AIMessage(content="", tool_calls=[{"name": "tool_pass_to_phase_3", "args": {}, "id": "forced_pass"}])
-    return {"messages": [forced_msg]}
-
 def phase_1_searcher(state: AnimaState):
-    print("[Phase 1] Executing tool calls...")
-
-    last_message = state["messages"][-1]
-    used_sources = state.get("used_sources", [])
-    search_results_text = ""
-    tool_messages = []
-    executed_actions = state.get("executed_actions", [])
-
-    if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-        for tool_call in last_message.tool_calls:
-            tool_name = tool_call["name"]
-            tool_args = tool_call.get("args", {})
-
-            keyword = (
-                tool_args.get("keyword")
-                or tool_args.get("target_date")
-                or tool_args.get("target_id")
-                or tool_args.get("artifact_hint")
-                or tool_args.get("keyword_z")
-                or tool_args.get("dummy_keyword")
-                or ""
-            )
-            if tool_name == "tool_scan_db_schema" and not keyword:
-                keyword = "전체스키마"
-            if isinstance(keyword, list):
-                keyword = ", ".join(str(k) for k in keyword)
-            elif not isinstance(keyword, str):
-                keyword = str(keyword)
-
-            action_signature = _stable_action_signature(tool_name, tool_args)
-            print(f"  [Phase 1] tool={tool_name} | target={keyword}")
-
-            if tool_name in {"tool_pass_to_phase_3", "tool_call_119_rescue"}:
-                result_str = "Control tool acknowledged."
-                exact_dates = []
-            elif not keyword.strip():
-                result_str = "[system warning] Empty search target detected."
-                exact_dates = []
-            elif action_signature in executed_actions:
-                tactic_note = toolbox.search_tactics(keyword)
-                result_str = (
-                    f"[duplicate warning] '{keyword}' was already searched.\n"
-                    f"Use this tactic note before retrying.\n\n{tactic_note}"
-                )
-                exact_dates = []
-            else:
-                executed_actions.append(action_signature)
-                try:
-                    if tool_name == "tool_search_memory":
-                        result = toolbox.search_memory(tool_args.get("keyword", ""))
-                        result_str, exact_dates = result if isinstance(result, tuple) and len(result) == 2 else (str(result), [])
-                    elif tool_name == "tool_read_full_diary":
-                        result = toolbox.read_full_source("일기장", tool_args.get("target_date", ""))
-                        result_str, exact_dates = result if isinstance(result, tuple) and len(result) == 2 else (str(result), [])
-                    elif tool_name == "tool_read_artifact":
-                        result = toolbox.read_artifact(tool_args.get("artifact_hint", ""))
-                        result_str, exact_dates = result if isinstance(result, tuple) and len(result) == 2 else (str(result), [])
-                    elif tool_name == "tool_scan_db_schema":
-                        result_str = toolbox.scan_db_schema()[0]
-                        exact_dates = []
-                    elif tool_name == "tool_scroll_chat_log":
-                        result = toolbox.scroll_chat_log(
-                            tool_args.get("target_id", ""),
-                            tool_args.get("direction", "both"),
-                            tool_args.get("limit", 15),
-                        )
-                        result_str, exact_dates = result if isinstance(result, tuple) and len(result) == 2 else (str(result), [])
-                    elif tool_name == "tool_scan_trend_u_function":
-                        result_str = toolbox.scan_trend_u_function(
-                            tool_args.get("keyword", ""),
-                            track_type=tool_args.get("track_type", "Episode"),
-                        )
-                        exact_dates = []
-                    elif tool_name == "tool_scan_trend_u_function_3d":
-                        result_str = toolbox.scan_trend_u_function(
-                            tool_args.get("keyword_z", ""),
-                            tool_args.get("keyword_anti_z", ""),
-                            tool_args.get("keyword_y", ""),
-                            track_type=tool_args.get("track_type", "PastRecord"),
-                        )
-                        exact_dates = []
-                    else:
-                        result_str, exact_dates = (f"Unknown tool: {tool_name}", [])
-
-                    if exact_dates and tool_name != "tool_read_artifact":
-                        extracted_topology = extract_local_topology(exact_dates)
-                        result_str = f"[local_topology]\n{extracted_topology}\n\n[source_data]\n{result_str}"
-                except Exception as e:
-                    print(f"  [Phase 1] tool error: {e}")
-                    result_str = f"[tool error] Search failed for target '{keyword}'."
-                    exact_dates = []
-
-            for source_id in exact_dates:
-                if source_id not in used_sources:
-                    used_sources.append(source_id)
-
-            search_results_text += f"[{tool_name} result]\n{result_str}\n\n"
-            tool_messages.append(ToolMessage(content=result_str, tool_call_id=tool_call["id"]))
-
-    return {
-        "search_results": search_results_text,
-        "used_sources": used_sources,
-        "executed_actions": executed_actions,
-        "messages": tool_messages,
-    }
+    return _run_phase_1_searcher(
+        state,
+        stable_action_signature=_stable_action_signature,
+        tool_carryover_from_state=_tool_carryover_from_state,
+        update_tool_carryover_after_tool=_update_tool_carryover_after_tool,
+        extract_local_topology=extract_local_topology,
+        print_fn=print,
+    )
 
 def _fallback_current_turn_raw_read_report(user_input: str):
     user_text = str(user_input or "").strip()
-    observed = user_text if user_text else "No current-turn content was available."
+    observed = user_text if user_text else "The current raw input is empty."
     return {
         "read_mode": "current_turn_only",
         "reviewed_all_input": True,
-        "source_summary": "Phase 2a reviewed only the current user turn because no external raw source was available.",
+        "source_summary": "No external source exists; the current user turn was reviewed as source text.",
         "items": [
             {
                 "source_id": "current_user_turn",
@@ -3430,7 +5381,7 @@ def _fallback_current_turn_raw_read_report(user_input: str):
                 "observed_fact": observed,
             }
         ] if user_text else [],
-        "coverage_notes": "Only the current turn was directly reviewed in this fallback path.",
+        "coverage_notes": "Fallback path reviewed only the current turn.",
     }
 
 
@@ -3455,8 +5406,8 @@ def _fallback_current_turn_with_recent_context_report(user_input: str, recent_co
         })
 
     base["items"] = items
-    base["source_summary"] = "Phase 2a reviewed the current turn and attached a small recent-context hint packet."
-    base["coverage_notes"] = f"Current turn plus {len(recent_subset)} recent-context hint item(s) were packaged for downstream review."
+    base["source_summary"] = "Reviewed the current turn and attached a small recent-context hint."
+    base["coverage_notes"] = f"Attached {len(recent_subset)} recent-context hints for downstream review."
     return base
 
 
@@ -3476,1138 +5427,1455 @@ def _fallback_recent_dialogue_raw_read_report(recent_context: str):
         })
 
     if not items:
-        return _fallback_current_turn_raw_read_report("")
+        return {
+            "read_mode": "recent_dialogue_review",
+            "reviewed_all_input": False,
+            "source_summary": "recent_context did not yield any parseable recent raw turns.",
+            "items": [],
+            "coverage_notes": (
+                "recent_dialogue_parse_failed: no parseable recent raw turns were recovered from "
+                "[Recent Raw Turns]. Expected user:/assistant: or [user]:/[assistant]: lines."
+            ),
+        }
 
     return {
         "read_mode": "recent_dialogue_review",
         "reviewed_all_input": True,
-        "source_summary": "Phase 2a reviewed recent raw dialogue turns from recent_context.",
+        "source_summary": "Recent raw turns from recent_context were reviewed as source text.",
         "items": items,
-        "coverage_notes": f"Recent raw turns reviewed: {len(items)} item(s). Use this packet to ground dialogue review before broader interpretation.",
+        "coverage_notes": f"Reviewed {len(items)} recent raw turns; use role-grounded turn evidence before broad interpretation.",
     }
 
 
-def phase_2a_reader(state: AnimaState):
-    print("[Phase 2a] 원본 소스를 처음부터 끝까지 검토 중...")
+def _recent_dialogue_review_failed(raw_read_report: dict):
+    if not isinstance(raw_read_report, dict):
+        return False
+    if str(raw_read_report.get("read_mode") or "").strip() != "recent_dialogue_review":
+        return False
+    if not bool(raw_read_report.get("reviewed_all_input")):
+        return True
+    items = raw_read_report.get("items", [])
+    if not isinstance(items, list) or len(items) < 2:
+        return True
+    coverage_notes = str(raw_read_report.get("coverage_notes") or "").strip().lower()
+    return "recent_dialogue_parse_failed" in coverage_notes
 
-    search_data = str(state.get("search_results", "") or "")
-    if not search_data.strip():
-        if _is_recent_dialogue_review_turn(state.get("user_input", ""), state.get("recent_context", "")):
-            raw_read_report = _fallback_recent_dialogue_raw_read_report(state.get("recent_context", ""))
-            print(f"  [Phase 2a] recent_dialogue_review | 최근 raw turns 수={len(raw_read_report.get('items', []))}")
-            return {"raw_read_report": raw_read_report}
-        raw_read_report = _fallback_current_turn_with_recent_context_report(
-            state.get("user_input", ""),
-            state.get("recent_context", ""),
-        )
-        recent_hint_count = max(len(raw_read_report.get("items", [])) - 1, 0)
-        print(f"  [Phase 2a] current_turn_only | 최근 맥락 힌트 수={recent_hint_count}")
-        return {"raw_read_report": raw_read_report}
 
-    sys_prompt = (
-        "You are the ANIMA phase 2a raw reader.\n\n"
-        "Read the provided raw material from start to finish and produce a raw-read report.\n"
-        "Do not argue yet. Do not deliver final judgments yet. Just review what was actually read and package it cleanly.\n\n"
-        f"[user_input]\n{state.get('user_input', '')}\n\n"
-        f"[recent_context_excerpt]\n{_phase3_recent_context_excerpt(state.get('recent_context', ''), max_chars=800) or 'N/A'}\n\n"
-        f"[raw_search_results]\n{search_data}\n\n"
-        "Rules:\n"
-        "1. reviewed_all_input should reflect whether the provided raw material was actually reviewed end-to-end.\n"
-        "2. items should capture source-level observations with short excerpts where possible.\n"
-        "3. observed_fact should stay factual and local to the reviewed source.\n"
-        "4. excerpt should be short and directly traceable to the source.\n"
-        "5. source_summary should summarize what was read, not what you infer.\n"
-        "6. coverage_notes should explain what was fully reviewed and what still remains unclear.\n"
-        "7. Do not invent tool results or source coverage that never happened.\n"
+def _recent_dialogue_review_has_concrete_turns(analysis_data: dict):
+    if not isinstance(analysis_data, dict):
+        return False
+    evidences = analysis_data.get("evidences", [])
+    if not isinstance(evidences, list):
+        evidences = []
+    for item in evidences:
+        if not isinstance(item, dict):
+            continue
+        source_id = str(item.get("source_id") or "").strip()
+        extracted_fact = str(item.get("extracted_fact") or "").strip()
+        if source_id.startswith("recent_turn_") and extracted_fact:
+            return True
+    return False
+
+
+def _field_memo_raw_read_report(search_data: str):
+    text = str(search_data or "").strip()
+    if "[tool_search_field_memos result]" not in text and "[FieldMemo search result]" not in text:
+        return {}
+    items = []
+    pattern = re.compile(
+        r"\[FieldMemo\s+\d+\]\s*"
+        r"memo_id:\s*(?P<memo_id>[^\n]+)\n"
+        r"(?:memo_level:\s*(?P<memo_level>[^\n]*)\n)?"
+        r"(?:summary_scope:\s*(?P<summary_scope>[^\n]*)\n)?"
+        r"branch_path:\s*(?P<branch_path>[^\n]*)\n"
+        r"root_entity:\s*(?P<root_entity>[^\n]*)\n"
+        r"memo_kind:\s*(?P<memo_kind>[^\n]*)\n"
+        r"(?:status:\s*(?P<status>[^\n]*)\n)?"
+        r"summary:\s*(?P<summary>[^\n]*)\n"
+        r"known_facts:\s*(?P<known_facts>[^\n]*)\n"
+        r"unknown_slots:\s*(?P<unknown_slots>[^\n]*)",
+        flags=re.DOTALL,
     )
-
-    structured_llm = llm_supervisor.with_structured_output(RawReadReport)
-    try:
-        response_obj = structured_llm.invoke([
-            SystemMessage(content=sys_prompt),
-            HumanMessage(content="Please read the supplied raw material and build a raw-read report."),
-        ])
-        raw_read_report = response_obj.model_dump()
-        item_count = len(raw_read_report.get("items", []))
-        print(f"  [Phase 2a] 읽기 모드={raw_read_report.get('read_mode', '')} | 항목 수={item_count}")
-    except Exception as e:
-        print(f"[Phase 2a] structured output 예외: {e}")
-        raw_read_report = {
-            "read_mode": "full_raw_review",
-            "reviewed_all_input": False,
-            "source_summary": "Phase 2a fallback path was used after a structured output failure.",
-            "items": [],
-            "coverage_notes": "The raw material could not be packaged cleanly by phase 2a.",
-        }
-
-    return {"raw_read_report": raw_read_report}
-
-
-def phase_2_analyzer(state: AnimaState):
-    print("[Phase 2b] phase_2a 원문 검토 결과를 바탕으로 구조화 증거철을 작성 중...")
-
-    current_loop = state.get("loop_count", 0)
-    auditor_memo = state.get("self_correction_memo", "")
-    working_memory_packet = _working_memory_packet_for_prompt(state.get("working_memory", {}))
-    raw_read_report = state.get("raw_read_report", {})
-    raw_read_packet = _raw_read_report_packet_for_prompt(raw_read_report)
-    source_relay_packet = _build_source_relay_packet(raw_read_report)
-    source_relay_prompt = _source_relay_packet_for_prompt(source_relay_packet)
-    read_mode = str(raw_read_report.get("read_mode") or "").strip()
-    analysis_mode = (
-        "recent_dialogue_review"
-        if read_mode == "recent_dialogue_review"
-        else "internal_reasoning_only"
-        if read_mode == "current_turn_only"
-        else "tool_grounded"
-    )
-
-    sys_prompt = (
-        "당신은 ANIMA의 2b 검사이자 근거 감사관이다.\n\n"
-        "phase 2a 원문 검토 보고를 읽고, 근거에 닻을 내린 분석 보고를 작성하라.\n"
-        "phase 2a가 실제로 검토한 내용만으로 evidences, analytical_thought, situational_brief를 만들어라.\n"
-        "당신의 임무는 진단뿐이다. 다음 도구를 계획하지 말고, 인식적 결핍을 분명하게 진단하라.\n"
-        "모든 자유서술 필드는 한국어로 작성하라.\n\n"
-        f"[analysis_mode]\n{analysis_mode}\n\n"
-        f"[user_input]\n{state['user_input']}\n\n"
-        f"[raw_read_report]\n{raw_read_packet}\n\n"
-        f"[auditor_memo]\n{auditor_memo if auditor_memo else 'N/A'}\n\n"
-        f"[working_memory]\n{working_memory_packet}\n\n"
-        f"[source_relay_packet]\n{source_relay_prompt}\n\n"
-        "[phase_2b_source_contract]\n"
-        "- phase_2a가 넘긴 모든 source packet에 대해 source_judgments를 작성하라.\n"
-        "- 각 source_judgment에는 source_status, accepted_facts, objection_reason, missing_info, search_needed가 포함되어야 한다.\n"
-        "- must_forward_facts는 반드시 릴레이되어야 하는 핵심 사실로 취급하라. 존재한다면 넓은 비판보다 먼저 accepted_facts와 evidences에 반영하라.\n"
-        "- situational_brief는 fact-first로 작성하라. 사용자 태도 언급은 source facts와 source judgments 뒤에만 붙여라.\n\n"
-        "규칙:\n"
-        "1. evidences는 구체적이고 source-grounded 해야 한다.\n"
-        "2. analytical_thought는 비판적이어도 되지만, 반드시 evidences에 묶여 있어야 한다.\n"
-        "3. situational_brief는 하위 노드들이 바로 활용할 수 있는 사건 요약이어야 한다.\n"
-        "4. 현재 근거로 신뢰 가능한 답이 가능할 때만 COMPLETED를 사용하라.\n"
-        "5. 핵심 근거가 비면 INCOMPLETE를 사용하라.\n"
-        "6. 수색이나 재검토를 한 번 더 하면 크게 나아질 때만 EXPANSION_REQUIRED를 사용하라.\n"
-        "7. 다음 도구를 계획하지 말고, 어떤 인식적 결핍이 남았는지만 적어라.\n"
-        "8. phase_2a가 읽지 않은 raw fact를 환각하지 말라.\n"
-        "9. internal_reasoning_only 모드에서는 정말 필요한 경우가 아니면 memory search를 강요하지 말라.\n"
-        "10. recent_dialogue_review 모드에서는 raw_read_report.items에 있는 실제 최근 턴에 근거하라.\n"
-    )
-
-    structured_llm = llm.with_structured_output(AnalysisReport)
-    try:
-        response_obj = structured_llm.invoke([
-            SystemMessage(content=sys_prompt),
-            HumanMessage(content=state["user_input"]),
-        ])
-        analysis_dict = _normalize_analysis_with_source_relay(response_obj.model_dump(), source_relay_packet)
-        analysis_dict = _enforce_recent_dialogue_review_analysis(analysis_dict, raw_read_report)
-        reasoning_board = _build_reasoning_board_from_analysis(state, analysis_dict)
-        status = analysis_dict.get("investigation_status", "UNKNOWN")
-        brief = analysis_dict.get("situational_brief", "")
-        print(f"  [Phase 2b] 상태={status} | 요약={brief[:120]}")
-        fake_ai_message = AIMessage(content=json.dumps(analysis_dict, ensure_ascii=False))
-    except Exception as e:
-        print(f"[Phase 2b] 구조화 출력 예외: {e}")
-        analysis_dict = {
-            "evidences": [],
-            "source_judgments": [],
-            "analytical_thought": "구조화 출력이 실패하여 2차 fallback 분석 패킷을 사용했습니다.",
-            "situational_brief": "구조화 출력 실패로 인해 2차 fallback 경로가 사용되었습니다.",
-            "investigation_status": "INCOMPLETE",
-        }
-        reasoning_board = _build_reasoning_board_from_analysis(state, analysis_dict)
-        fake_ai_message = AIMessage(content="phase_2_fallback_seed")
-
-    war_room = _war_room_from_critic(state, analysis_dict, raw_read_report)
+    for match in pattern.finditer(text):
+        memo_id = str(match.group("memo_id") or "").strip()
+        branch_path = str(match.group("branch_path") or "").strip()
+        root_entity = str(match.group("root_entity") or "").strip()
+        memo_level = str(match.group("memo_level") or "1").strip()
+        summary_scope = str(match.group("summary_scope") or "").strip()
+        memo_kind = str(match.group("memo_kind") or "").strip()
+        status = str(match.group("status") or "active").strip()
+        summary = str(match.group("summary") or "").strip()
+        known_facts = str(match.group("known_facts") or "").strip()
+        unknown_slots = str(match.group("unknown_slots") or "").strip()
+        observed = " / ".join(part for part in [summary, f"memo_level={memo_level}", f"summary_scope={summary_scope}", f"status={status}", f"known_facts={known_facts}", f"unknown_slots={unknown_slots}"] if part)
+        if not memo_id or not observed:
+            continue
+        items.append({
+            "source_id": memo_id,
+            "source_type": "field_memo",
+            "excerpt": observed[:360],
+            "observed_fact": observed[:360],
+            "branch_path": branch_path,
+            "root_entity": root_entity,
+            "memo_kind": memo_kind,
+            "status": status,
+            "memo_level": memo_level,
+            "summary_scope": summary_scope,
+            "summary": summary,
+            "known_facts": known_facts,
+            "unknown_slots": unknown_slots,
+        })
+    if not items and "FieldMemo entries exist" in text:
+        items.append({
+            "source_id": "field_memo_empty",
+            "source_type": "field_memo",
+            "excerpt": "FieldMemo search returned no entries.",
+            "observed_fact": "FieldMemo search returned no matching memo for the current query.",
+        })
+    if not items:
+        return {}
     return {
-        "analysis_report": analysis_dict,
-        "reasoning_board": reasoning_board,
-        "war_room": war_room,
-        "loop_count": current_loop + 1,
-        "messages": [fake_ai_message],
+        "read_mode": "field_memo_review",
+        "reviewed_all_input": True,
+        "source_summary": f"Read {len(items)} FieldMemo candidates as recall candidates.",
+        "items": items,
+        "coverage_notes": "FieldMemo entries are recall candidates; phase_2b must separate verified facts from uncertain or missing slots.",
     }
 
 
-def phase_119_rescue(state: AnimaState):
-    print("[Phase 119] 긴급 구조 루프를 호출합니다.")
-
-    sys_prompt = (
-        "You are the ANIMA phase 119 rescue guard.\n\n"
-        "The system is stuck or over-iterating. Produce a compact rescue memo that helps the supervisor hand control back safely.\n"
-        "State the most important limit, the safest next move, and whether phase 3 should answer with caution.\n\n"
-        f"[user_input]\n{state['user_input']}\n\n"
-        f"[analysis_report]\n{_analysis_packet_for_prompt(state.get('analysis_report', {}), include_thought=True)}\n\n"
-        f"[reasoning_board]\n{_reasoning_board_packet_for_prompt(state.get('reasoning_board', {}), approved_only=False)}\n\n"
-    )
-
-    response = llm.invoke([
-        SystemMessage(content=sys_prompt),
-        HumanMessage(content=state["user_input"]),
-    ])
-
-    return {
-        "supervisor_instructions": f"[119 rescue] {response.content}",
-        "messages": [response],
-    }
-
-
-def phase_3_validator(state: AnimaState):
-    response_strategy = state.get("response_strategy", {})
-    reasoning_board = state.get("reasoning_board", {})
-    loop_count = state.get("loop_count", 0)
-    phase3_recent_context = _phase3_recent_context_excerpt(state.get("recent_context", ""))
-    phase3_reference_policy = _phase3_reference_policy(state.get("search_results", ""), loop_count)
-    judge_speaker_packet = _build_judge_speaker_packet(
-        reasoning_board=reasoning_board,
-        response_strategy=response_strategy,
-        phase3_reference_policy=phase3_reference_policy,
-    )
-    judge_speaker_prompt = _judge_speaker_packet_for_prompt(judge_speaker_packet)
-    grounded_mode = judge_speaker_packet.get("speaker_mode") == "grounded_mode"
-
-    if grounded_mode:
-        print("[Phase 3] 판사 공개본을 바탕으로 최종 답변 생성 중...")
-    else:
-        print("[Phase 3] 현재 사용자 입력과 판사 공개본을 바탕으로 직접 대화 응답 생성 중...")
-
-    supervisor_memo = state.get("supervisor_instructions", "")
-    if "[119 rescue]" not in supervisor_memo:
-        supervisor_memo = ""
-
-    sys_prompt = (
-        "당신은 ANIMA의 3차 화자다.\n\n"
-        "판사가 승인한 공개 패킷을 사용자-facing 최종 답변으로 바꿔라.\n"
-        "내부 토론을 다시 열지 말고, 숨겨진 워크플로, 판사 패킷, 내부 역할명을 노출하지 말라.\n\n"
-        f"[response_mode]\n{'grounded_mode' if grounded_mode else 'direct_dialogue_mode'}\n\n"
-        f"[judge_speaker_packet]\n{judge_speaker_prompt}\n\n"
-        f"[recent_context_excerpt]\n{phase3_recent_context if phase3_recent_context else 'N/A'}\n\n"
-        + ((f"[supervisor_memo]\n{supervisor_memo}\n\n") if supervisor_memo else "")
-        + "규칙:\n"
-        "1. judge_speaker_packet을 주된 송달 패킷으로 취급하라.\n"
-        "2. user_input과 recent_context_excerpt는 직전 흐름 유지를 위한 보조 맥락으로만 써라.\n"
-        "3. judge_speaker_packet과 recent_context_excerpt가 충돌하면 judge_speaker_packet을 따른다.\n"
-        "4. approved_fact_cells와 approved_claims는 전달 보조 자료일 뿐, 새 추론 놀이터가 아니다.\n"
-        "5. must_avoid_claims를 엄격히 지켜라.\n"
-        "6. final_answer_brief가 있으면 가장 강한 답변 씨앗으로 사용하라.\n"
-        "7. reply_mode가 continue_previous_offer면 대화를 처음부터 다시 시작하지 말고 직전 흐름을 이어라.\n"
-        "8. reply_mode가 ask_user_question_now면 모호한 메타 질문 대신 구체적인 질문 한 개를 던져라.\n"
-        "9. answer_now가 false이고 reference_mode가 hidden_large_raw면, 허세를 부리지 말고 정확한 후속 질문을 택하라.\n"
-        "10. 근거가 약할수록 uncertainty_policy를 따르라.\n"
-        "11. 최종 답변은 사용자가 다른 언어를 명시적으로 원하지 않는 한 자연스러운 한국어여야 한다.\n"
-    )
-
-    response = llm.invoke([
-        SystemMessage(content=sys_prompt),
-        HumanMessage(content=state["user_input"]),
-    ])
-
-    raw_text = response.content if isinstance(response.content, str) else str(response.content)
-    normalized_text = _normalize_user_facing_text(raw_text)
-    final_message = AIMessage(content=normalized_text if normalized_text else raw_text)
-
-    print("[Phase 3] 최종 응답 생성 완료.")
-    return {"messages": [final_message]}
-
-
-def _source_relay_packet_for_prompt(source_relay_packet: dict):
-    if not isinstance(source_relay_packet, dict) or not source_relay_packet:
-        return "사용 가능한 소스 릴레이 패킷이 없습니다."
-    try:
-        return json.dumps(source_relay_packet, ensure_ascii=False, indent=2)
-    except TypeError:
-        return str(source_relay_packet)
-
-
-def _build_source_relay_packet(raw_read_report: dict):
-    if not isinstance(raw_read_report, dict) or not raw_read_report:
+def _fallback_tool_grounded_raw_read_report(search_data: str):
+    text = str(search_data or "").strip()
+    if not text:
         return {
             "read_mode": "empty",
             "reviewed_all_input": False,
-            "global_source_summary": "",
-            "global_coverage_notes": "",
-            "source_packets": [],
+            "source_summary": "Search result text was empty, so no raw-read packet could be built.",
+            "items": [],
+            "coverage_notes": "tool-grounded fallback parser did not receive any search result text.",
         }
 
-    read_mode = str(raw_read_report.get("read_mode") or "").strip() or "empty"
-    reviewed_all_input = bool(raw_read_report.get("reviewed_all_input", False))
-    global_source_summary = str(raw_read_report.get("source_summary") or "").strip()
-    global_coverage_notes = str(raw_read_report.get("coverage_notes") or "").strip()
-    grouped = {}
-
-    for item in raw_read_report.get("items", []):
-        if not isinstance(item, dict):
+    source_pattern = re.compile(
+        r"\[Source\s+\d+\s*\|\s*track=(?P<track>[^\|\]]+)\s*\|\s*source_id=(?P<source_id>[^\]]+)\]\s*(?P<body>.*?)(?=\n\[Source\s+\d+\s*\||\Z)",
+        flags=re.DOTALL,
+    )
+    items = []
+    for match in source_pattern.finditer(text):
+        source_type = str(match.group("track") or "").strip() or "memory"
+        source_id = str(match.group("source_id") or "").strip() or "unknown_source"
+        body = str(match.group("body") or "").strip()
+        body = re.sub(r"^\[local_topology\].*?\[source_data\]\s*", "", body, flags=re.DOTALL).strip()
+        observed = body[:240].strip()
+        if not observed:
             continue
-        source_id = str(item.get("source_id") or "").strip() or "unknown_source"
-        source_type = str(item.get("source_type") or "").strip() or "unknown"
-        key = (source_id, source_type)
-        packet = grouped.setdefault(key, {
+        items.append({
             "source_id": source_id,
             "source_type": source_type,
-            "source_summary": "",
-            "coverage_notes": "",
-            "must_forward_facts": [],
-            "quoted_excerpts": [],
-            "coverage_complete": reviewed_all_input,
-        })
-        observed_fact = str(item.get("observed_fact") or "").strip()
-        excerpt = str(item.get("excerpt") or "").strip()
-        if observed_fact and observed_fact not in packet["must_forward_facts"]:
-            packet["must_forward_facts"].append(observed_fact)
-        if excerpt and excerpt not in packet["quoted_excerpts"]:
-            packet["quoted_excerpts"].append(excerpt)
-
-    source_packets = []
-    if grouped:
-        multi_source = len(grouped) > 1
-        for (_, _), packet in grouped.items():
-            source_id = packet["source_id"]
-            source_type = packet["source_type"]
-            packet["source_summary"] = (
-                f"phase_2a가 `{source_id}`({source_type}) 원문을 검토했습니다."
-                if multi_source else
-                (global_source_summary or f"phase_2a가 `{source_id}`({source_type}) 원문을 검토했습니다.")
-            )
-            packet["coverage_notes"] = global_coverage_notes or "phase_2a가 이 소스에 대해 원문 검토 패스를 마쳤습니다."
-            packet["must_forward_facts"] = packet["must_forward_facts"][:6]
-            packet["quoted_excerpts"] = packet["quoted_excerpts"][:3]
-            source_packets.append(packet)
-
-    if not source_packets and read_mode == "current_turn_only":
-        source_packets.append({
-            "source_id": "current_user_turn",
-            "source_type": "current_turn",
-            "source_summary": global_source_summary or "현재 사용자 턴만 이번 턴에서 사용 가능한 유일한 원문으로 검토되었습니다.",
-            "coverage_notes": global_coverage_notes or "이번 턴에는 외부 원문 소스가 없어 현재 턴만 직접 검토했습니다.",
-            "must_forward_facts": [],
-            "quoted_excerpts": [],
-            "coverage_complete": reviewed_all_input,
-        })
-
-    return {
-        "read_mode": read_mode,
-        "reviewed_all_input": reviewed_all_input,
-        "global_source_summary": global_source_summary,
-        "global_coverage_notes": global_coverage_notes,
-        "source_packets": source_packets,
-    }
-
-
-def _fallback_current_turn_raw_read_report(user_input: str):
-    user_text = str(user_input or "").strip()
-    observed = user_text if user_text else "현재 턴 원문이 비어 있습니다."
-    return {
-        "read_mode": "current_turn_only",
-        "reviewed_all_input": True,
-        "source_summary": "외부 원문이 없어 현재 사용자 턴만 원문으로 검토했습니다.",
-        "items": [
-            {
-                "source_id": "current_user_turn",
-                "source_type": "current_turn",
-                "excerpt": observed[:240],
-                "observed_fact": observed,
-            }
-        ] if user_text else [],
-        "coverage_notes": "이 fallback 경로에서는 현재 턴만 직접 검토했습니다.",
-    }
-
-
-def _fallback_current_turn_with_recent_context_report(user_input: str, recent_context: str, max_recent_turns: int = 2):
-    base = _fallback_current_turn_raw_read_report(user_input)
-    turns = _extract_recent_raw_turns_from_context(recent_context, max_turns=max_recent_turns)
-    if not turns:
-        return base
-
-    items = base.get("items", []) if isinstance(base.get("items"), list) else []
-    recent_subset = turns[-max_recent_turns:]
-    for idx, turn in enumerate(recent_subset, start=1):
-        role = str(turn.get("role") or "unknown").strip()
-        content = str(turn.get("content") or "").strip()
-        if not content:
-            continue
-        items.append({
-            "source_id": f"recent_hint_{idx}",
-            "source_type": "recent_chat_hint",
-            "excerpt": f"{role}: {content}"[:240],
-            "observed_fact": f"{role}: {content}",
-        })
-
-    base["items"] = items
-    base["source_summary"] = "현재 턴을 검토하고, 최근 대화 힌트를 소량 함께 첨부했습니다."
-    base["coverage_notes"] = f"현재 턴과 최근 대화 힌트 {len(recent_subset)}개를 downstream 검토용으로 묶었습니다."
-    return base
-
-
-def _fallback_recent_dialogue_raw_read_report(recent_context: str):
-    turns = _extract_recent_raw_turns_from_context(recent_context)
-    items = []
-    for idx, turn in enumerate(turns, start=1):
-        role = str(turn.get("role") or "unknown").strip()
-        content = str(turn.get("content") or "").strip()
-        if not content:
-            continue
-        items.append({
-            "source_id": f"recent_turn_{idx}",
-            "source_type": "recent_chat_turn",
-            "excerpt": f"{role}: {content}"[:240],
-            "observed_fact": f"{role}: {content}",
+            "excerpt": observed,
+            "observed_fact": observed,
         })
 
     if not items:
-        return _fallback_current_turn_raw_read_report("")
+        tool_chunks = re.findall(r"\[(.*?) result\]\s*(.*?)(?=\n\[[^\n]+ result\]|\Z)", text, flags=re.DOTALL)
+        for idx, (tool_name, body) in enumerate(tool_chunks[:4], start=1):
+            cleaned = re.sub(r"^\[local_topology\].*?\[source_data\]\s*", "", str(body).strip(), flags=re.DOTALL).strip()
+            if not cleaned:
+                continue
+            items.append({
+                "source_id": f"tool_result_{idx}",
+                "source_type": str(tool_name).strip() or "tool_result",
+                "excerpt": cleaned[:240],
+                "observed_fact": cleaned[:240],
+            })
 
     return {
-        "read_mode": "recent_dialogue_review",
-        "reviewed_all_input": True,
-        "source_summary": "recent_context에 들어 있는 최근 raw 대화 턴들을 원문처럼 다시 검토했습니다.",
+        "read_mode": "full_raw_review",
+        "reviewed_all_input": bool(items),
+        "source_summary": (
+            f"Extracted {len(items)} grounded items from tool results using deterministic fallback parsing."
+            if items else
+            "Could not extract grounded items from tool results."
+        ),
         "items": items,
-        "coverage_notes": f"최근 raw 대화 턴 {len(items)}개를 검토했습니다. 더 넓은 해석보다 먼저 이 패킷을 근거로 대화 검토를 진행하세요.",
+        "coverage_notes": (
+            "Structured raw-read report was too thin, so deterministic fallback parsing was used."
+            if items else
+            "Deterministic fallback parser found no usable grounded text."
+        ),
+    }
+
+
+def _artifact_grounded_raw_read_report(search_data: str):
+    text = str(search_data or "").strip()
+    artifact_start = text.find("[artifact]")
+    if artifact_start < 0:
+        return {}
+    if artifact_start > 0:
+        text = text[artifact_start:].lstrip()
+
+    header_match = re.search(
+        r"\[artifact\]\s*"
+        r"path:\s*(?P<path>[^\n]+)\n"
+        r"type:\s*(?P<type>[^\n]+)\n"
+        r"name:\s*(?P<name>[^\n]+)\n\n",
+        text,
+        flags=re.DOTALL,
+    )
+    if not header_match:
+        return {}
+
+    artifact_path = str(header_match.group("path") or "").strip()
+    artifact_type = str(header_match.group("type") or "").strip().lower()
+    artifact_name = str(header_match.group("name") or "").strip() or os.path.basename(artifact_path) or "artifact"
+    body = text[header_match.end():].strip()
+    if not body:
+        return {
+            "read_mode": "full_raw_review",
+            "reviewed_all_input": False,
+            "source_summary": f"No readable body text was found in {artifact_name}.",
+            "items": [],
+            "coverage_notes": "Artifact fast path found an empty body and could not build usable grounded items.",
+        }
+
+    items = []
+    source_id = artifact_name
+    source_type = "artifact"
+
+    if artifact_type == ".pptx":
+        slide_lines = [
+            line.strip()
+            for line in body.splitlines()
+            if line.strip()
+        ]
+        for idx, line in enumerate(slide_lines[:12], start=1):
+            cleaned = re.sub(r"^\[slide\s+\d+\]\s*", "", line, flags=re.IGNORECASE).strip()
+            if not cleaned:
+                continue
+            slide_match = re.match(r"^\[slide\s+(\d+)\]\s*", line, flags=re.IGNORECASE)
+            slide_no = slide_match.group(1) if slide_match else str(idx)
+            items.append({
+                "source_id": f"{source_id}#slide_{slide_no}",
+                "source_type": source_type,
+                "excerpt": line[:240],
+                "observed_fact": cleaned[:240],
+            })
+    else:
+        paragraphs = [
+            chunk.strip()
+            for chunk in re.split(r"\n\s*\n+", body)
+            if chunk.strip()
+        ]
+        if len(paragraphs) <= 1:
+            paragraphs = [
+                line.strip()
+                for line in body.splitlines()
+                if line.strip()
+            ]
+        for idx, paragraph in enumerate(paragraphs[:10], start=1):
+            collapsed = re.sub(r"\s+", " ", paragraph).strip()
+            if not collapsed:
+                continue
+            items.append({
+                "source_id": f"{source_id}#part_{idx}",
+                "source_type": source_type,
+                "excerpt": collapsed[:240],
+                "observed_fact": collapsed[:240],
+            })
+
+    if not items:
+        collapsed = re.sub(r"\s+", " ", body).strip()
+        if collapsed:
+            items.append({
+                "source_id": source_id,
+                "source_type": source_type,
+                "excerpt": collapsed[:240],
+                "observed_fact": collapsed[:240],
+            })
+
+    if not items:
+        return {}
+
+    source_summary = (
+        f"{artifact_name} was reviewed by deterministic artifact parsing and "
+        f"{len(items)} grounded items were extracted."
+    )
+    coverage_notes = (
+        "Artifact fast path bypassed structured LLM reading and packed source text into slide/section grounded items."
+    )
+    return {
+        "read_mode": "full_raw_review",
+        "reviewed_all_input": True,
+        "source_summary": source_summary,
+        "items": items,
+        "coverage_notes": coverage_notes,
     }
 
 
 def phase_2a_reader(state: AnimaState):
-    print("[Phase 2a] 원본 소스를 처음부터 끝까지 검토 중...")
-
-    search_data = str(state.get("search_results", "") or "")
-    if not search_data.strip():
-        if _is_recent_dialogue_review_turn(state.get("user_input", ""), state.get("recent_context", "")):
-            raw_read_report = _fallback_recent_dialogue_raw_read_report(state.get("recent_context", ""))
-            print(f"  [Phase 2a] recent_dialogue_review | 최근 raw turns 수={len(raw_read_report.get('items', []))}")
-            return {"raw_read_report": raw_read_report}
-        raw_read_report = _fallback_current_turn_with_recent_context_report(
-            state.get("user_input", ""),
-            state.get("recent_context", ""),
-        )
-        recent_hint_count = max(len(raw_read_report.get("items", [])) - 1, 0)
-        print(f"  [Phase 2a] current_turn_only | 최근 대화 힌트 수={recent_hint_count}")
-        return {"raw_read_report": raw_read_report}
-
-    sys_prompt = (
-        "당신은 ANIMA의 phase 2a 원문 검토관입니다.\n\n"
-        "제공된 원문을 처음부터 끝까지 읽고 raw-read report를 작성하라.\n"
-        "아직 논쟁하지 말고, 아직 최종 판정도 내리지 마라. 실제로 무엇을 읽었는지와 어떻게 패키징했는지만 정리하라.\n"
-        "모든 자유서술 필드는 한국어로 작성하라.\n\n"
-        f"[user_input]\n{state.get('user_input', '')}\n\n"
-        f"[recent_context_excerpt]\n{_phase3_recent_context_excerpt(state.get('recent_context', ''), max_chars=800) or 'N/A'}\n\n"
-        f"[raw_search_results]\n{search_data}\n\n"
-        "규칙:\n"
-        "1. reviewed_all_input는 제공된 원문을 실제로 끝까지 검토했는지 반영해야 한다.\n"
-        "2. items는 가능한 한 source 단위 관찰과 짧은 발췌를 담아야 한다.\n"
-        "3. observed_fact는 검토한 source에 국한된 사실이어야 한다.\n"
-        "4. excerpt는 짧고 source에 직접 추적 가능해야 한다.\n"
-        "5. source_summary는 읽은 내용을 요약해야 하며, 추론을 적지 마라.\n"
-        "6. coverage_notes는 무엇을 충분히 읽었고 무엇이 아직 불명확한지 설명해야 한다.\n"
-        "7. 실제로 없던 tool 결과나 source coverage를 꾸며내지 마라.\n"
+    return _run_phase_2a_reader(
+        state,
+        llm_supervisor=llm_supervisor,
+        raw_read_report_schema=RawReadReport,
+        is_recent_dialogue_review_turn=_is_recent_dialogue_review_turn,
+        fallback_recent_dialogue_raw_read_report=_fallback_recent_dialogue_raw_read_report,
+        recent_dialogue_review_failed=_recent_dialogue_review_failed,
+        fallback_current_turn_with_recent_context_report=_fallback_current_turn_with_recent_context_report,
+        execution_trace_after_phase2a=_execution_trace_after_phase2a,
+        field_memo_raw_read_report=_field_memo_raw_read_report,
+        artifact_grounded_raw_read_report=_artifact_grounded_raw_read_report,
+        phase3_recent_context_excerpt=_phase3_recent_context_excerpt,
+        fallback_tool_grounded_raw_read_report=_fallback_tool_grounded_raw_read_report,
+        print_fn=print,
     )
 
-    structured_llm = llm_supervisor.with_structured_output(RawReadReport)
-    try:
-        response_obj = structured_llm.invoke([
-            SystemMessage(content=sys_prompt),
-            HumanMessage(content="제공된 원문을 읽고 raw-read report를 작성하라."),
-        ])
-        raw_read_report = response_obj.model_dump()
-        item_count = len(raw_read_report.get("items", []))
-        print(f"  [Phase 2a] 읽기 모드={raw_read_report.get('read_mode', '')} | 항목 수={item_count}")
-    except Exception as e:
-        print(f"[Phase 2a] 구조화 출력 예외: {e}")
-        raw_read_report = {
-            "read_mode": "full_raw_review",
-            "reviewed_all_input": False,
-            "source_summary": "구조화 출력 실패로 phase_2a fallback 경로가 사용되었습니다.",
-            "items": [],
-            "coverage_notes": "phase_2a가 원문을 깔끔하게 패키징하지 못했습니다.",
+
+def _is_initiative_request_turn(user_input: str):
+    text = unicodedata.normalize("NFKC", str(user_input or "").strip()).lower()
+    if not text:
+        return False
+    if _is_assistant_question_request_turn(text):
+        return True
+    markers = ["you decide", "you think", "do not ask", "just propose", "figure it out", "\ub124\uac00 \ud310\ub2e8", "\ub124\uac00 \uc0dd\uac01", "\uc9c1\uc811 \ud574", "\uc81c\uc548\ud574"]
+    return any(marker in text for marker in markers)
+
+
+def _enforce_thin_raw_strategist_escalation(
+    strategist_payload: dict,
+    analysis_data: dict,
+    raw_read_report: dict,
+    user_input: str,
+    working_memory: dict,
+):
+    if not isinstance(strategist_payload, dict):
+        strategist_payload = {}
+
+    status = str((analysis_data or {}).get("investigation_status") or "").upper()
+    raw_strength = _raw_grounding_strength(raw_read_report)
+    evidences = (analysis_data or {}).get("evidences", []) if isinstance(analysis_data, dict) else []
+    grounded_facts = [
+        str(item.get("extracted_fact") or "").strip()
+        for item in evidences
+        if isinstance(item, dict) and str(item.get("extracted_fact") or "").strip()
+    ]
+    grounded_facts = _dedupe_keep_order(grounded_facts)[:3]
+    should_escalate = (
+        raw_strength == "thin"
+        and (status in {"", "INCOMPLETE", "EXPANSION_REQUIRED"} or not grounded_facts)
+    )
+    if not should_escalate:
+        return strategist_payload
+
+    normalized = json.loads(json.dumps(strategist_payload, ensure_ascii=False))
+    action_plan = _normalize_action_plan(normalized.get("action_plan", {}))
+    if action_plan.get("required_tool"):
+        return normalized
+
+    tool_candidate = _strategist_tool_request_from_context(user_input, analysis_data, working_memory)
+    case_theory = str(normalized.get("case_theory") or "").strip()
+    escalation_note = "Raw grounding is still thin, so the strategist should ask for stronger evidence before trusting contextual interpretation."
+    normalized["case_theory"] = f"{case_theory} {escalation_note}".strip() if case_theory else escalation_note
+
+    if tool_candidate:
+        normalized["action_plan"] = {
+            "current_step_goal": "Thin raw grounding means the next step should gather one stronger source before any final delivery.",
+            "required_tool": _tool_call_to_instruction(
+                str(tool_candidate.get("tool_name") or ""),
+                tool_candidate.get("tool_args", {}),
+            ),
+            "next_steps_forecast": [
+                "Re-run phase 2 on the stronger grounded source.",
+                "Let 2b diagnose the new fact layer before composing delivery.",
+                "Only deliver a final answer after grounded evidence becomes stable.",
+            ],
         }
+        normalized["response_strategy"] = None
+        return normalized
 
-    return {"raw_read_report": raw_read_report}
-
-
-def phase_2_analyzer(state: AnimaState):
-    print("[Phase 2b] phase_2a 원문 검토 결과를 바탕으로 구조화 증거철을 작성 중...")
-
-    current_loop = state.get("loop_count", 0)
-    auditor_memo = state.get("self_correction_memo", "")
-    working_memory_packet = _working_memory_packet_for_prompt(state.get("working_memory", {}))
-    raw_read_report = state.get("raw_read_report", {})
-    raw_read_packet = _raw_read_report_packet_for_prompt(raw_read_report)
-    source_relay_packet = _build_source_relay_packet(raw_read_report)
-    source_relay_prompt = _source_relay_packet_for_prompt(source_relay_packet)
-    read_mode = str(raw_read_report.get("read_mode") or "").strip()
-    analysis_mode = (
-        "recent_dialogue_review"
-        if read_mode == "recent_dialogue_review"
-        else "internal_reasoning_only"
-        if read_mode == "current_turn_only"
-        else "tool_grounded"
-    )
-
-    sys_prompt = (
-        "당신은 ANIMA의 2b 검사이자 사실 감사관입니다.\n\n"
-        "phase 2a 원문 검토 보고를 읽고, 그 근거 위에서만 분석 보고서를 작성하라.\n"
-        "phase 2a가 실제로 검토한 내용만으로 evidences, analytical_thought, situational_brief를 만들어라.\n"
-        "당신의 임무는 진단이지 다음 도구 계획이 아니다. 인식적 결핍이 무엇인지 분명하게 적어라.\n"
-        "모든 자유서술 필드는 한국어로 작성하라.\n\n"
-        f"[analysis_mode]\n{analysis_mode}\n\n"
-        f"[user_input]\n{state['user_input']}\n\n"
-        f"[raw_read_report]\n{raw_read_packet}\n\n"
-        f"[auditor_memo]\n{auditor_memo if auditor_memo else 'N/A'}\n\n"
-        f"[working_memory]\n{working_memory_packet}\n\n"
-        f"[source_relay_packet]\n{source_relay_prompt}\n\n"
-        "[phase_2b_source_contract]\n"
-        "- phase_2a가 넘긴 모든 source packet에 대해 source_judgments를 작성하라.\n"
-        "- 각 source_judgment에는 source_status, accepted_facts, objection_reason, missing_info, search_needed가 들어가야 한다.\n"
-        "- must_forward_facts는 반드시 릴레이되어야 하는 직접 관찰 사실이다. 존재한다면 비판보다 먼저 accepted_facts와 evidences에 반영하라.\n"
-        "- situational_brief는 fact-first로 작성하라. 사용자 태도 평가는 source facts와 source judgments 이후에만 덧붙여라.\n\n"
-        "규칙:\n"
-        "1. evidences는 구체적이고 source-grounded여야 한다.\n"
-        "2. analytical_thought는 비판적이어도 되지만 반드시 evidences에 묶여 있어야 한다.\n"
-        "3. situational_brief는 상위 노드들이 바로 사용할 수 있는 사건 요약이어야 한다.\n"
-        "4. 현재 근거로 답변이 가능할 때만 COMPLETED를 사용하라.\n"
-        "5. 직접 근거가 비면 INCOMPLETE를 사용하라.\n"
-        "6. 더 읽거나 확인해야 종결할 수 있을 때만 EXPANSION_REQUIRED를 사용하라.\n"
-        "7. 다음 도구를 계획하지 말고, 어떤 인식적 결핍이 있는지만 적어라.\n"
-        "8. phase_2a가 읽지 않은 raw fact를 새로 만들지 마라.\n"
-        "9. internal_reasoning_only 모드에서 바로 답할 수 있다면 memory search를 강요하지 마라.\n"
-        "10. recent_dialogue_review 모드에서는 raw_read_report.items에 담긴 실제 최근 대화 턴을 직접 근거로 사용하라.\n"
-    )
-
-    structured_llm = llm.with_structured_output(AnalysisReport)
-    try:
-        response_obj = structured_llm.invoke([
-            SystemMessage(content=sys_prompt),
-            HumanMessage(content=state["user_input"]),
-        ])
-        analysis_dict = _normalize_analysis_with_source_relay(response_obj.model_dump(), source_relay_packet)
-        analysis_dict = _enforce_recent_dialogue_review_analysis(analysis_dict, raw_read_report)
-        reasoning_board = _build_reasoning_board_from_analysis(state, analysis_dict)
-        status = analysis_dict.get("investigation_status", "UNKNOWN")
-        brief = analysis_dict.get("situational_brief", "")
-        print(f"  [Phase 2b] 상태={status} | 요약={brief[:120]}")
-        fake_ai_message = AIMessage(content=json.dumps(analysis_dict, ensure_ascii=False))
-    except Exception as e:
-        print(f"[Phase 2b] 구조화 출력 예외: {e}")
-        analysis_dict = {
-            "evidences": [],
-            "source_judgments": [],
-            "analytical_thought": "구조화 출력이 실패하여 2차 fallback 분석 문구를 사용합니다.",
-            "situational_brief": "구조화 출력 실패로 인해 2차 fallback 경로가 사용되었습니다.",
-            "investigation_status": "INCOMPLETE",
-        }
-        reasoning_board = _build_reasoning_board_from_analysis(state, analysis_dict)
-        fake_ai_message = AIMessage(content="phase_2_fallback_seed")
-
-    war_room = _war_room_from_critic(state, analysis_dict, raw_read_report)
-    return {
-        "analysis_report": analysis_dict,
-        "reasoning_board": reasoning_board,
-        "war_room": war_room,
-        "loop_count": current_loop + 1,
-        "messages": [fake_ai_message],
+    normalized["action_plan"] = {
+        "current_step_goal": "The current raw evidence is too thin, so the next step must stay in clarification or evidence-gathering mode.",
+        "required_tool": "",
+        "next_steps_forecast": [
+            "Reduce contextual speculation instead of completing the answer from weak signals.",
+            "Ask for one stronger anchor only if retrieval cannot be chosen safely.",
+        ],
     }
+    normalized["response_strategy"] = None
+    return normalized
 
 
-def phase_119_rescue(state: AnimaState):
-    print("[Phase 119] 긴급 구조 루프를 실행합니다.")
-
-    sys_prompt = (
-        "당신은 ANIMA의 119 구조 가드입니다.\n\n"
-        "시스템이 루프에 갇히거나 과도하게 반복되고 있습니다. 상위 제어권이 안전하게 돌아갈 수 있도록 짧은 구조 메모를 작성하라.\n"
-        "가장 중요한 한계, 가장 안전한 다음 행동, 그리고 3차가 조심스럽게 답해야 하는지를 적어라.\n"
-        "모든 자유서술 필드는 한국어로 작성하라.\n\n"
-        f"[user_input]\n{state['user_input']}\n\n"
-        f"[analysis_report]\n{_analysis_packet_for_prompt(state.get('analysis_report', {}), include_thought=True)}\n\n"
-        f"[reasoning_board]\n{_reasoning_board_packet_for_prompt(state.get('reasoning_board', {}), approved_only=False)}\n\n"
-    )
-
-    response = llm.invoke([
-        SystemMessage(content=sys_prompt),
-        HumanMessage(content=state["user_input"]),
-    ])
-
-    return {
-        "supervisor_instructions": f"[119 rescue] {response.content}",
-        "messages": [response],
-    }
+_previous_followup_context_expected = _base_followup_context_expected
 
 
-def phase_3_validator(state: AnimaState):
-    response_strategy = state.get("response_strategy", {})
-    reasoning_board = state.get("reasoning_board", {})
-    loop_count = state.get("loop_count", 0)
-    phase3_recent_context = _phase3_recent_context_excerpt(state.get("recent_context", ""))
-    phase3_reference_policy = _phase3_reference_policy(state.get("search_results", ""), loop_count)
-    judge_speaker_packet = _build_judge_speaker_packet(
-        reasoning_board=reasoning_board,
-        response_strategy=response_strategy,
-        phase3_reference_policy=phase3_reference_policy,
-    )
-    judge_speaker_prompt = _judge_speaker_packet_for_prompt(judge_speaker_packet)
-    grounded_mode = judge_speaker_packet.get("speaker_mode") == "grounded_mode"
-
-    if grounded_mode:
-        print("[Phase 3] 판사 공개본을 바탕으로 최종 답변 생성 중...")
-    else:
-        print("[Phase 3] 현재 사용자 입력과 판사 공개본을 바탕으로 직접 대화 응답 생성 중...")
-
-    supervisor_memo = state.get("supervisor_instructions", "")
-    if "[119 rescue]" not in supervisor_memo:
-        supervisor_memo = ""
-
-    sys_prompt = (
-        "당신은 ANIMA의 3차 화자입니다.\n\n"
-        "판사가 승인한 공개 패킷을 사용자-facing 최종 응답으로 바꿔라.\n"
-        "내부 루프를 다시 심사하지 말고, 위원회나 워룸, 판사 공개본, 내부 역할명을 노출하지 마라.\n"
-        "최종 응답은 자연스러운 한국어로 작성하라.\n\n"
-        f"[response_mode]\n{'grounded_mode' if grounded_mode else 'direct_dialogue_mode'}\n\n"
-        f"[judge_speaker_packet]\n{judge_speaker_prompt}\n\n"
-        f"[recent_context_excerpt]\n{phase3_recent_context if phase3_recent_context else 'N/A'}\n\n"
-        + ((f"[supervisor_memo]\n{supervisor_memo}\n\n") if supervisor_memo else "")
-        + "규칙:\n"
-        "1. judge_speaker_packet을 주된 송달 패킷으로 취급하라.\n"
-        "2. user_input과 recent_context_excerpt는 직전 흐름 유지를 위한 보조 맥락으로만 사용하라.\n"
-        "3. judge_speaker_packet과 recent_context_excerpt가 충돌하면 judge_speaker_packet을 따르라.\n"
-        "4. approved_fact_cells와 approved_claims는 발화 보조 재료일 뿐 새 데이터가 아니다.\n"
-        "5. must_avoid_claims를 엄격하게 지켜라.\n"
-        "6. final_answer_brief가 있으면 가능한 강한 답변 씨앗으로 사용하라.\n"
-        "7. reply_mode가 continue_previous_offer면 대화를 처음부터 다시 시작하지 말고 직전 흐름을 이어라.\n"
-        "8. reply_mode가 ask_user_question_now면 모호한 메타 질문 대신 구체적인 질문 한 개를 던져라.\n"
-        "9. answer_now가 false이고 reference_mode가 hidden_large_raw면 허세를 부리지 말고 정확한 후속 질문을 생성하라.\n"
-        "10. 근거가 약하면 uncertainty_policy를 따르라.\n"
-        "11. 내부 역할 설명이나 시스템 프롬프트 냄새가 나는 표현을 사용자에게 직접 말하지 마라.\n"
-    )
-
-    response = llm.invoke([
-        SystemMessage(content=sys_prompt),
-        HumanMessage(content=state["user_input"]),
-    ])
-
-    raw_text = response.content if isinstance(response.content, str) else str(response.content)
-    normalized_text = _normalize_user_facing_text(raw_text)
-    final_message = AIMessage(content=normalized_text if normalized_text else raw_text)
-
-    print("[Phase 3] 최종 응답 생성 완료.")
-    return {"messages": [final_message]}
+def _followup_context_expected(user_input: str, recent_context: str, working_memory: dict):
+    if _pending_dialogue_act_accepts_current_turn(user_input, working_memory):
+        return True
+    if _temporal_context_prefers_current_input(working_memory):
+        return False
+    if looks_like_memo_recall_turn(user_input):
+        return False
+    return _previous_followup_context_expected(user_input, recent_context, working_memory)
 
 
-def phase_minus_1b_auditor(state: AnimaState):
-    print("[Phase -1b] 현재 턴을 감사 중...")
-
-    user_input = str(state.get("user_input") or "")
+def _phase2a_should_inherit_task_context(state: AnimaState):
+    user_input = str(state.get("user_input") or "").strip()
     recent_context = str(state.get("recent_context") or "")
-    analysis_data = state.get("analysis_report", {})
-    if not isinstance(analysis_data, dict):
-        analysis_data = {}
-    has_analysis = bool(analysis_data)
+    working_memory = state.get("working_memory", {})
+    execution_trace = _normalize_execution_trace(state.get("execution_trace", {}))
+    tool_carryover = _tool_carryover_from_state(state)
+    if not user_input:
+        return False
+    normalized = unicodedata.normalize("NFKC", user_input)
+    retry_markers = [
+        "again",
+        "previous",
+        "that",
+        "not that",
+        "read again",
+        "search again",
+        "\ub2e4\uc2dc",
+        "\uc774\uc804",
+        "\uadf8\uac70",
+        "\ubc18\ubcf5",
+        "\uc9c1\uc811",
+    ]
+    refers_back = any(marker in normalized for marker in retry_markers)
+
+    if _followup_context_expected(user_input, recent_context, working_memory):
+        return True
+    if _working_memory_expects_continuation(working_memory):
+        return True
+    if refers_back and (
+        _working_memory_active_task(working_memory)
+        or execution_trace.get("source_ids")
+        or execution_trace.get("executed_tool")
+        or tool_carryover.get("source_ids")
+    ):
+        return True
+    if _looks_like_scroll_followup_turn(user_input) and _tool_carryover_anchor_id(state):
+        return True
+    return False
+
+
+def _phase2a_task_inheritance_packet(state: AnimaState):
+    if not _phase2a_should_inherit_task_context(state):
+        return {}
+
     working_memory = state.get("working_memory", {})
     if not isinstance(working_memory, dict):
         working_memory = {}
-    reasoning_board = state.get("reasoning_board", {})
-    if not isinstance(reasoning_board, dict):
-        reasoning_board = {}
+    execution_trace = _normalize_execution_trace(state.get("execution_trace", {}))
     strategist_output = state.get("strategist_output", {})
     if not isinstance(strategist_output, dict):
         strategist_output = {}
-    war_room = _normalize_war_room_state(state.get("war_room", {}))
-    loop_count = int(state.get("loop_count", 0) or 0)
+    tool_carryover = _tool_carryover_from_state(state)
+    dialogue_state = working_memory.get("dialogue_state", {})
+    if not isinstance(dialogue_state, dict):
+        dialogue_state = {}
+    evidence_state = working_memory.get("evidence_state", {})
+    if not isinstance(evidence_state, dict):
+        evidence_state = {}
 
-    reasoning_plan = state.get("reasoning_plan", {})
-    if not isinstance(reasoning_plan, dict) or not reasoning_plan:
-        reasoning_plan = _plan_reasoning_budget(user_input, recent_context, working_memory)
-    reasoning_budget = int(state.get("reasoning_budget", reasoning_plan.get("budget", 1)) or reasoning_plan.get("budget", 1) or 1)
-    if reasoning_budget < 0:
-        reasoning_budget = 0
+    active_task = str(dialogue_state.get("active_task") or "").strip()
+    active_task_source = str(dialogue_state.get("active_task_source") or "").strip()
+    active_offer = str(dialogue_state.get("active_offer") or "").strip()
+    active_offer_source = str(dialogue_state.get("active_offer_source") or "").strip()
+    goal_lock = _normalize_goal_lock(strategist_output.get("goal_lock", {}))
+    carried_source_ids = _dedupe_keep_order(
+        list(evidence_state.get("active_source_ids", [])) + list(execution_trace.get("source_ids", []))
+    )[:5]
 
-    artifact_hint = _extract_artifact_hint(user_input)
-
-    if artifact_hint and not has_analysis and reasoning_plan.get("preferred_path") == "tool_first":
-        memo = "자료 검토 요청이 감지되어 원문 도구부터 실행합니다."
-        decision = _make_auditor_decision(
-            "call_tool",
-            memo=memo,
-            tool_name="tool_read_artifact",
-            tool_args={"artifact_hint": artifact_hint},
-        )
-        print(f"  [-1b] {memo} | instruction={decision['instruction']}")
-        war_room = _war_room_after_judge(war_room, decision, analysis_data, reasoning_board)
-        return {
-            "auditor_instruction": decision["instruction"],
-            "auditor_decision": decision,
-            "self_correction_memo": memo,
-            "reasoning_board": reasoning_board,
-            "war_room": war_room,
-            "reasoning_budget": reasoning_budget,
-            "reasoning_plan": reasoning_plan,
-        }
-
-    if _followup_context_expected(user_input, recent_context, working_memory):
-        memo = "가벼운 후속 턴으로 보이므로 바로 3차에서 이어서 답할 수 있습니다."
-        decision = _make_auditor_decision("phase_3", memo=memo)
-        print(f"  [-1b] {memo} | instruction={decision['instruction']}")
-        followup_strategy = _followup_ack_strategy(user_input, recent_context)
-        war_room = _war_room_after_judge(war_room, decision, analysis_data, reasoning_board)
-        return {
-            "response_strategy": followup_strategy,
-            "auditor_instruction": decision["instruction"],
-            "auditor_decision": decision,
-            "self_correction_memo": memo,
-            "reasoning_board": reasoning_board,
-            "war_room": war_room,
-            "reasoning_budget": reasoning_budget,
-            "reasoning_plan": reasoning_plan,
-        }
-
-    if _is_assistant_question_request_turn(user_input):
-        memo = "사용자가 지금 당장 assistant의 구체적인 질문 1개를 원합니다."
-        decision = _make_auditor_decision("phase_3", memo=memo)
-        print(f"  [-1b] {memo} | instruction={decision['instruction']}")
-        question_strategy = _ask_user_question_strategy(user_input, working_memory)
-        war_room = _war_room_after_judge(war_room, decision, analysis_data, reasoning_board)
-        return {
-            "response_strategy": question_strategy,
-            "auditor_instruction": decision["instruction"],
-            "auditor_decision": decision,
-            "self_correction_memo": memo,
-            "reasoning_board": reasoning_board,
-            "war_room": war_room,
-            "reasoning_budget": reasoning_budget,
-            "reasoning_plan": reasoning_plan,
-        }
-
-    if not has_analysis and reasoning_plan.get("preferred_path") == "internal_reasoning" and reasoning_budget > 0:
-        memo = str(reasoning_plan.get("rationale") or "현재 턴은 바로 내보내기 전에 내부 사고 1회가 더 필요합니다.").strip()
-        decision = _make_auditor_decision("internal_reasoning", memo=memo)
-        print(f"  [-1b] {memo} | instruction={decision['instruction']}")
-        war_room = _war_room_after_judge(war_room, decision, analysis_data, reasoning_board)
-        return {
-            "auditor_instruction": decision["instruction"],
-            "auditor_decision": decision,
-            "self_correction_memo": memo,
-            "reasoning_board": reasoning_board,
-            "war_room": war_room,
-            "reasoning_budget": reasoning_budget,
-            "reasoning_plan": reasoning_plan,
-        }
-
-    if not has_analysis and reasoning_plan.get("preferred_path") == "direct_answer":
-        memo = str(reasoning_plan.get("rationale") or "현재 턴은 도구를 먼저 쓰지 않아도 직접 답변할 수 있습니다.").strip()
-        decision = _make_auditor_decision("phase_3", memo=memo)
-        response_strategy = {}
-        if _is_initiative_request_turn(user_input):
-            response_strategy = _initiative_request_strategy(user_input, working_memory)
-        response_strategy, _, speaker_review = _prepare_phase3_delivery(
-            user_input=user_input,
-            recent_context=recent_context,
-            working_memory=working_memory,
-            reasoning_board=reasoning_board,
-            analysis_data=analysis_data,
-            response_strategy=response_strategy,
-            search_results=state.get("search_results", ""),
-            loop_count=loop_count,
-        )
-        if speaker_review.get("should_remand") and reasoning_budget > 0:
-            decision = _make_auditor_decision(
-                "internal_reasoning",
-                memo="3차 송달 점검 결과 패킷이 아직 약하므로, 한 번 더 내부 루프를 도는 편이 안전합니다.",
-            )
-            response_strategy = {}
-        print(f"  [-1b] {decision.get('memo', memo)} | instruction={decision['instruction']}")
-        war_room = _war_room_after_judge(war_room, decision, analysis_data, reasoning_board)
-        return {
-            "response_strategy": response_strategy,
-            "auditor_instruction": decision["instruction"],
-            "auditor_decision": decision,
-            "self_correction_memo": decision.get("memo", memo),
-            "reasoning_board": reasoning_board,
-            "war_room": war_room,
-            "speaker_review": speaker_review,
-            "reasoning_budget": reasoning_budget,
-            "reasoning_plan": reasoning_plan,
-        }
-
-    if has_analysis or reasoning_board.get("candidate_pairs") or reasoning_board.get("fact_cells"):
-        reasoning_board = _audit_reasoning_board(reasoning_board, analysis_data)
-        preferred_strategist = _preferred_decision_from_strategist(
-            strategist_output,
-            analysis_data,
-            loop_count,
-            reasoning_budget=reasoning_budget,
-        )
-        if preferred_strategist:
-            print(f"  [-1b] 전략 계획 판정: {preferred_strategist.get('memo', '')} | instruction={preferred_strategist.get('instruction', '')}")
-            war_room = _war_room_after_judge(war_room, preferred_strategist, analysis_data, reasoning_board)
-            response_strategy = strategist_output.get("response_strategy", {})
-            if not isinstance(response_strategy, dict):
-                response_strategy = {}
-            if str(preferred_strategist.get("action") or "").strip() != "phase_3":
-                response_strategy = {}
-            if str(preferred_strategist.get("action") or "").strip() == "answer_not_ready":
-                response_strategy = _answer_not_ready_strategy(user_input, war_room)
-            return {
-                "strategist_output": strategist_output,
-                "response_strategy": response_strategy,
-                "auditor_instruction": preferred_strategist.get("instruction", ""),
-                "auditor_decision": preferred_strategist,
-                "self_correction_memo": preferred_strategist.get("memo", ""),
-                "reasoning_board": reasoning_board,
-                "war_room": war_room,
-                "reasoning_budget": reasoning_budget,
-                "reasoning_plan": reasoning_plan,
-            }
-        preferred_verdict = _preferred_decision_from_verdict(
-            reasoning_board,
-            analysis_data,
-            loop_count,
-            user_input=user_input,
-            working_memory=working_memory,
-            reasoning_budget=reasoning_budget,
-        )
-        if preferred_verdict:
-            print(f"  [-1b] 판결 보드 결정: {preferred_verdict.get('memo', '')} | instruction={preferred_verdict.get('instruction', '')}")
-            war_room = _war_room_after_judge(war_room, preferred_verdict, analysis_data, reasoning_board)
-            response_strategy = {}
-            if str(preferred_verdict.get("action") or "").strip() == "answer_not_ready":
-                response_strategy = _answer_not_ready_strategy(user_input, war_room)
-            return {
-                "strategist_output": strategist_output,
-                "response_strategy": response_strategy,
-                "auditor_instruction": preferred_verdict.get("instruction", ""),
-                "auditor_decision": preferred_verdict,
-                "self_correction_memo": preferred_verdict.get("memo", ""),
-                "reasoning_board": reasoning_board,
-                "war_room": war_room,
-                "reasoning_budget": reasoning_budget,
-                "reasoning_plan": reasoning_plan,
-            }
-
-    analysis_packet = _analysis_packet_for_prompt(analysis_data, include_thought=True)
-    strategist_packet = _strategist_output_packet_for_prompt(strategist_output)
-    working_memory_packet = _working_memory_packet_for_prompt(working_memory)
-    reasoning_board_packet = _reasoning_board_packet_for_prompt(reasoning_board, approved_only=False)
-    user_state = state.get("user_state", "")
-    user_char = state.get("user_char", "")
-    time_gap = state.get("time_gap", 0)
-    tolerance = state.get("global_tolerance", 1.0)
-    bio_status = state.get("biolink_status", "")
-
-    sys_prompt = (
-        "당신은 ANIMA의 -1b 감사관이자 판사입니다.\n\n"
-        "현재 턴, 최근 대화, working_memory, 분석 보고, 그리고 전략가의 계획을 함께 읽고 판결을 내려라.\n"
-        "이 사건이 바로 3차로 가야 하는지, 내부 사고를 더 해야 하는지, 도구를 호출해야 하는지, 계획을 더 세워야 하는지, 아니면 answer_not_ready로 가야 하는지 결정하라.\n"
-        "보류하거나 반려할 때는 왜 그런지 운영 언어로 분명하게 설명하라.\n"
-        "모든 자유서술 필드는 한국어로 작성하라.\n\n"
-        f"[user_input]\n{user_input}\n\n"
-        f"[recent_context]\n{recent_context}\n\n"
-        f"[user_state]\n{user_state}\n\n"
-        f"[user_char]\n{user_char}\n\n"
-        f"[time_gap]\n{time_gap}\n\n"
-        f"[global_tolerance]\n{tolerance}\n\n"
-        f"[biolink_status]\n{bio_status}\n\n"
-        f"[working_memory]\n{working_memory_packet}\n\n"
-        f"[reasoning_budget]\n{reasoning_budget}\n\n"
-        f"[reasoning_plan]\n{json.dumps(reasoning_plan, ensure_ascii=False)}\n\n"
-        f"[reasoning_board]\n{reasoning_board_packet}\n\n"
-        f"[analysis_report]\n{analysis_packet}\n\n"
-        f"[analysis_exists]\n{has_analysis}\n\n"
-        f"[strategist_output]\n{strategist_packet}\n\n"
-        "규칙:\n"
-        "1. call_tool을 고를 때 instruction_to_0는 반드시 정확한 tool call이어야 한다.\n"
-        "2. analysis_exists가 false이면 investigation_status가 이미 존재하는 것처럼 꾸며내지 마라.\n"
-        "3. current user_input을 주 앵커로 삼고, recent_context와 working_memory는 보조 증거로만 사용하라.\n"
-        "4. 2차는 사건을 진단하고, -1a는 단계별 행동 계획을 세운다.\n"
-        "5. strategist_output.action_plan.required_tool이 유효하면, 즉흥적인 다른 도구 경로를 만들기 전에 그 계획부터 검토하라.\n"
-        "6. COMPLETED는 phase_3로 갈 수 있다.\n"
-        "7. reasoning_budget은 계획 가이드이지 절대적인 하드 컷오프가 아니다.\n"
-        "8. EXPANSION_REQUIRED는 soft budget이 찼더라도 graph의 hard stop이 남아 있으면 계속 plan_more나 call_tool을 선택할 수 있다.\n"
-        "9. 송달 패킷이 약하면 bluffing보다 plan_more 또는 answer_not_ready를 우선하라.\n"
-    )
-
-    decision = None
-    try:
-        structured_llm = llm.with_structured_output(AuditorOutput)
-        res = structured_llm.invoke([SystemMessage(content=sys_prompt)])
-        memo = str(res.rejection_reason or "").strip()
-        preferred = _preferred_decision_from_strategist(
-            strategist_output,
-            analysis_data,
-            loop_count,
-            reasoning_budget=reasoning_budget,
-        )
-        if preferred is None and has_analysis:
-            preferred = _preferred_decision_from_analysis(
-                analysis_data,
-                loop_count,
-                user_input=user_input,
-                working_memory=working_memory,
-                reasoning_budget=reasoning_budget,
-            )
-        if preferred:
-            decision = preferred
-        else:
-            decision = _decision_from_instruction(
-                str(res.instruction_to_0 or "").strip(),
-                is_satisfied=bool(res.is_satisfied),
-                memo=memo,
-            )
-        if decision is None:
-            if artifact_hint:
-                decision = _make_auditor_decision(
-                    "call_tool",
-                    memo=memo or "fallback 라우팅에서 자료 검토 요청을 감지했습니다.",
-                    tool_name="tool_read_artifact",
-                    tool_args={"artifact_hint": artifact_hint},
-                )
-            elif _should_default_to_memory_search(user_input, analysis_data, working_memory):
-                keyword = _normalize_search_keyword(user_input)
-                decision = _make_auditor_decision(
-                    "call_tool",
-                    memo=memo or "retrieval 의존 턴으로 보여 fallback 메모리 검색을 선택했습니다.",
-                    tool_name="tool_search_memory",
-                    tool_args={"keyword": keyword or "recent context"},
-                )
-            else:
-                decision = _make_auditor_decision(
-                    "phase_3",
-                    memo=memo or "더 강한 도구 경로가 없어 fallback 직접 송달을 선택했습니다.",
-                )
-    except Exception as e:
-        print(f"[Phase -1b] 구조화 출력 예외: {e}")
-        preferred = _preferred_decision_from_strategist(
-            strategist_output,
-            analysis_data,
-            loop_count,
-            reasoning_budget=reasoning_budget,
-        )
-        if preferred is None and has_analysis:
-            preferred = _preferred_decision_from_analysis(
-                analysis_data,
-                loop_count,
-                user_input=user_input,
-                working_memory=working_memory,
-                reasoning_budget=reasoning_budget,
-            )
-        if preferred:
-            decision = preferred
-        else:
-            if artifact_hint:
-                decision = _make_auditor_decision(
-                    "call_tool",
-                    memo="구조화 출력이 실패하여 fallback으로 자료 검토를 선택했습니다.",
-                    tool_name="tool_read_artifact",
-                    tool_args={"artifact_hint": artifact_hint},
-                )
-            elif _should_default_to_memory_search(user_input, analysis_data, working_memory):
-                decision = _make_auditor_decision(
-                    "call_tool",
-                    memo="구조화 출력이 실패하여 fallback 메모리 검색을 선택했습니다.",
-                    tool_name="tool_search_memory",
-                    tool_args={"keyword": _normalize_search_keyword(user_input) or "recent context"},
-                )
-            else:
-                decision = _make_auditor_decision(
-                    "phase_3",
-                    memo="구조화 출력이 실패하여 fallback 직접 송달을 선택했습니다.",
-                )
-
-    if not has_analysis and _decision_uses_unanchored_topic(decision, user_input, analysis_data):
-        if _is_directive_or_correction_turn(user_input) or _is_initiative_request_turn(user_input):
-            decision = _make_auditor_decision(
-                "phase_3",
-                memo="무관한 오래된 주제를 차단하고 현재 사용자 요청으로 다시 앵커링했습니다.",
-            )
-        elif _is_artifact_review_turn(user_input):
-            decision = _make_auditor_decision(
-                "call_tool",
-                memo="무관한 오래된 주제를 차단하고 자료 검토 경로로 다시 앵커링했습니다.",
-                tool_name="tool_read_artifact",
-                tool_args={"artifact_hint": _extract_artifact_hint(user_input)},
-            )
-        elif _should_default_to_memory_search(user_input, analysis_data, working_memory):
-            decision = _make_auditor_decision(
-                "call_tool",
-                memo="무관한 오래된 주제를 차단하고 메모리 검색으로 다시 앵커링했습니다.",
-                tool_name="tool_search_memory",
-                tool_args={"keyword": _normalize_search_keyword(user_input) or "recent context"},
-            )
-        else:
-            decision = _make_auditor_decision(
-                "phase_3",
-                memo="무관한 오래된 주제를 차단하고 현재 사용자 요청으로 다시 앵커링했습니다.",
-            )
-
-    reasoning_board = _audit_reasoning_board(reasoning_board, analysis_data)
-    if reasoning_board.get("candidate_pairs"):
-        approved_pairs = len(reasoning_board.get("final_pair_ids", []))
-        print(f"  [-1b] 승인된 추론쌍={approved_pairs} / 전체={len(reasoning_board.get('candidate_pairs', []))}")
-
-    war_room = _war_room_after_judge(war_room, decision, analysis_data, reasoning_board)
-    response_strategy = strategist_output.get("response_strategy", {}) if str(decision.get("action") or "").strip() == "phase_3" else {}
-    if not isinstance(response_strategy, dict):
-        response_strategy = {}
-    if str(decision.get("action") or "").strip() == "answer_not_ready":
-        response_strategy = _answer_not_ready_strategy(user_input, war_room)
-    print(f"  [-1b] 최종 판정: {decision.get('memo', '')} | instruction={decision.get('instruction', '')}")
     return {
-        "strategist_output": strategist_output,
-        "response_strategy": response_strategy,
-        "auditor_instruction": decision.get("instruction", ""),
-        "auditor_decision": decision,
-        "self_correction_memo": decision.get("memo", ""),
-        "reasoning_board": reasoning_board,
-        "war_room": war_room,
-        "reasoning_budget": reasoning_budget,
-        "reasoning_plan": reasoning_plan,
+        "active_task": active_task,
+        "active_task_source": active_task_source,
+        "active_offer": active_offer,
+        "active_offer_source": active_offer_source,
+        "goal_lock": goal_lock,
+        "source_ids": carried_source_ids,
+        "executed_tool": str(execution_trace.get("executed_tool") or "").strip(),
+        "operation_kind": str(execution_trace.get("operation_kind") or "").strip(),
+        "read_focus": str(execution_trace.get("read_focus") or "").strip(),
+        "analysis_focus": str(execution_trace.get("analysis_focus") or "").strip(),
+        "tool_carryover": tool_carryover,
+        "self_correction_memo": str(state.get("self_correction_memo") or "").strip(),
     }
 
 
-def _raw_dialogue_text_for_role_check(raw_read_report: dict, user_input: str) -> str:
-    parts = []
-    if isinstance(raw_read_report, dict):
-        for item in raw_read_report.get("items", []):
-            if not isinstance(item, dict):
+def _apply_phase2a_task_inheritance(raw_read_report: dict, inheritance_packet: dict | None = None):
+    if not isinstance(raw_read_report, dict):
+        raw_read_report = {}
+    inheritance_packet = inheritance_packet if isinstance(inheritance_packet, dict) else {}
+    if not inheritance_packet:
+        return raw_read_report
+
+    normalized = json.loads(json.dumps(raw_read_report, ensure_ascii=False))
+    items = normalized.get("items", [])
+    if not isinstance(items, list):
+        items = []
+
+    def _append_item(source_id: str, observed_fact: str):
+        text = str(observed_fact or "").strip()
+        if not text:
+            return
+        items.append({
+            "source_id": source_id,
+            "source_type": "task_inheritance",
+            "excerpt": text[:240],
+            "observed_fact": text[:240],
+        })
+
+    active_task = str(inheritance_packet.get("active_task") or "").strip()
+    if active_task:
+        source_label = str(inheritance_packet.get("active_task_source") or "").strip() or "working_memory"
+        _append_item("inherited_active_task", f"Previous active task from {source_label}: {active_task}")
+
+    active_offer = str(inheritance_packet.get("active_offer") or "").strip()
+    if active_offer:
+        offer_source = str(inheritance_packet.get("active_offer_source") or "").strip() or "assistant_offer"
+        _append_item("inherited_active_offer", f"Previous assistant offer from {offer_source}: {active_offer}")
+
+    goal_lock = inheritance_packet.get("goal_lock", {})
+    if isinstance(goal_lock, dict):
+        user_goal_core = str(goal_lock.get("user_goal_core") or "").strip()
+        answer_shape = str(goal_lock.get("answer_shape") or "").strip()
+        if user_goal_core:
+            _append_item(
+                "inherited_goal_lock",
+                f"Previous goal lock: {user_goal_core}" + (f" | answer_shape={answer_shape}" if answer_shape else ""),
+            )
+
+    source_ids = inheritance_packet.get("source_ids", [])
+    if isinstance(source_ids, list) and source_ids:
+        joined = ", ".join(str(item).strip() for item in source_ids[:3] if str(item).strip())
+        if joined:
+            _append_item("inherited_source_ids", f"Previously active sources: {joined}")
+
+    executed_tool = str(inheritance_packet.get("executed_tool") or "").strip()
+    operation_kind = str(inheritance_packet.get("operation_kind") or "").strip()
+    if executed_tool:
+        _append_item(
+            "inherited_last_tool",
+            f"Last executed tool: {executed_tool}" + (f" | operation_kind={operation_kind}" if operation_kind else ""),
+        )
+
+    tool_carryover = _normalize_tool_carryover_state(inheritance_packet.get("tool_carryover", {}))
+    anchor_id = tool_carryover.get("origin_source_id") or tool_carryover.get("last_target_id")
+    if anchor_id or tool_carryover.get("source_ids"):
+        source_hint = ", ".join(tool_carryover.get("source_ids", [])[:4])
+        _append_item(
+            "inherited_tool_carryover",
+            (
+                f"ToolCarryoverState: origin={anchor_id or 'n/a'} | "
+                f"last_tool={tool_carryover.get('last_tool') or 'n/a'} | "
+                f"last_query={tool_carryover.get('last_query') or 'n/a'} | "
+                f"source_ids={source_hint or 'n/a'}"
+            ),
+        )
+
+    read_focus = str(inheritance_packet.get("read_focus") or "").strip()
+    analysis_focus = str(inheritance_packet.get("analysis_focus") or "").strip()
+    if read_focus or analysis_focus:
+        _append_item(
+            "inherited_focus",
+            f"Previous focus: read_focus={read_focus or 'n/a'} | analysis_focus={analysis_focus or 'n/a'}",
+        )
+
+    correction_memo = str(inheritance_packet.get("self_correction_memo") or "").strip()
+    if correction_memo:
+        _append_item("inherited_correction_memo", f"Judge self-correction memo: {correction_memo}")
+
+    normalized["items"] = items
+    summary = str(normalized.get("source_summary") or "").strip()
+    coverage = str(normalized.get("coverage_notes") or "").strip()
+    inherit_note = "Task inheritance context from the previous active task was attached for this read."
+    normalized["source_summary"] = (summary + " " + inherit_note).strip()
+    normalized["coverage_notes"] = (coverage + " " + inherit_note).strip()
+    return normalized
+
+
+_previous_minimal_direct_dialogue_strategy = _base_minimal_direct_dialogue_strategy
+
+
+def _minimal_direct_dialogue_strategy(user_input: str, working_memory: dict):
+    context_strategy = _short_term_context_response_strategy(user_input, working_memory)
+    if context_strategy and (_working_memory_expects_continuation(working_memory) or not _has_substantive_dialogue_anchor(user_input)):
+        return context_strategy
+
+    strategy = _previous_minimal_direct_dialogue_strategy(user_input, working_memory)
+    if not isinstance(strategy, dict):
+        return strategy
+    if not str(strategy.get("delivery_freedom_mode") or "").strip():
+        strategy["delivery_freedom_mode"] = "grounded"
+    if _temporal_context_allows_carry_over(working_memory):
+        return strategy
+
+    must_include = strategy.get("must_include_facts", [])
+    if isinstance(must_include, list):
+        filtered = []
+        for item in must_include:
+            text = str(item or "").strip()
+            if "Active task context" in text or "active_task" in text:
                 continue
-            observed = str(item.get("observed_fact") or "").strip()
-            excerpt = str(item.get("excerpt") or "").strip()
-            if observed:
-                parts.append(observed)
-            elif excerpt:
-                parts.append(excerpt)
-    user_text = str(user_input or "").strip()
-    if user_text:
-        parts.append(user_text)
-    return " ".join(part for part in parts if part)
+            filtered.append(text)
+        strategy["must_include_facts"] = filtered
+    return strategy
 
 
-def _extract_role_sensitive_quote(raw_text: str) -> str:
-    text = str(raw_text or "").strip()
+_previous_initiative_request_strategy = _base_initiative_request_strategy
+
+
+def _initiative_request_strategy(user_input: str, working_memory: dict):
+    strategy = _previous_initiative_request_strategy(user_input, working_memory)
+    if not isinstance(strategy, dict):
+        return strategy
+    strategy["delivery_freedom_mode"] = "proposal"
+    if _temporal_context_allows_carry_over(working_memory):
+        return strategy
+
+    must_include = strategy.get("must_include_facts", [])
+    if isinstance(must_include, list):
+        filtered = []
+        for item in must_include:
+            text = str(item or "").strip()
+            if "Active task context" in text or "active_task" in text:
+                continue
+            filtered.append(text)
+        strategy["must_include_facts"] = filtered
+    return strategy
+
+
+_previous_phase_2a_reader = phase_2a_reader
+
+
+def _base_phase_2a_reader(state: AnimaState):
+    search_data = str(state.get("search_results", "") or "")
+    if search_data.strip() or _is_recent_dialogue_review_turn(state.get("user_input", ""), state.get("recent_context", "")):
+        result = _previous_phase_2a_reader(state)
+        if isinstance(result, dict) and isinstance(result.get("raw_read_report"), dict):
+            result = _attach_ledger_event(
+                result,
+                state,
+                source_kind="raw_read_report",
+                producer_node="phase_2a_reader",
+                source_ref=str(result.get("raw_read_report", {}).get("read_mode") or "source_review"),
+                content=result.get("raw_read_report", {}),
+                confidence=0.9,
+            )
+        return result
+
+    print("[Phase 2a] Reading raw sources end-to-end...")
+    recent_hint_budget = _recent_hint_budget_from_working_memory(state.get("working_memory", {}))
+    inheritance_packet = _phase2a_task_inheritance_packet(state)
+    if recent_hint_budget <= 0:
+        raw_read_report = _fallback_current_turn_raw_read_report(state.get("user_input", ""))
+        raw_read_report = _apply_phase2a_task_inheritance(raw_read_report, inheritance_packet)
+        print("  [Phase 2a] current_turn_only | temporal topic-shift signal blocks stale recent hints")
+        if inheritance_packet:
+            print("  [Phase 2a] task_inheritance | previous task context attached")
+        return _attach_ledger_event({
+            "raw_read_report": raw_read_report,
+            "execution_trace": _execution_trace_after_phase2a(state, raw_read_report),
+        }, state, source_kind="raw_read_report", producer_node="phase_2a_reader", source_ref="current_turn_only", content=raw_read_report, confidence=0.85)
+
+    raw_read_report = _fallback_current_turn_with_recent_context_report(
+        state.get("user_input", ""),
+        state.get("recent_context", ""),
+        max_recent_turns=recent_hint_budget,
+    )
+    raw_read_report = _apply_phase2a_task_inheritance(raw_read_report, inheritance_packet)
+    recent_hint_count = max(len(raw_read_report.get("items", [])) - 1, 0)
+    print(f"  [Phase 2a] current_turn_only | recent hints={recent_hint_count}")
+    if inheritance_packet:
+        print("  [Phase 2a] task_inheritance | previous task context attached")
+    return _attach_ledger_event({
+        "raw_read_report": raw_read_report,
+        "execution_trace": _execution_trace_after_phase2a(state, raw_read_report),
+    }, state, source_kind="raw_read_report", producer_node="phase_2a_reader", source_ref="current_turn_with_recent_context", content=raw_read_report, confidence=0.85)
+
+
+_previous_phase_minus_1a_thinker = _base_phase_minus_1a_thinker
+
+
+def _ensure_operation_contract_in_strategist_payload(
+    strategist_payload: dict,
+    user_input: str,
+    analysis_data: dict,
+):
+    if not isinstance(strategist_payload, dict):
+        strategist_payload = {}
+    normalized = json.loads(json.dumps(strategist_payload, ensure_ascii=False))
+    action_plan = _normalize_action_plan(normalized.get("action_plan", {}))
+    response_strategy = normalized.get("response_strategy", {})
+    if not isinstance(response_strategy, dict):
+        response_strategy = {}
+    action_plan["operation_contract"] = _derive_operation_contract(
+        user_input,
+        action_plan,
+        response_strategy=response_strategy,
+        analysis_data=analysis_data,
+    )
+    normalized["action_plan"] = action_plan
+    return normalized
+
+
+def _ensure_operation_plan_in_strategist_payload(
+    strategist_payload: dict,
+    user_input: str,
+    analysis_data: dict,
+    working_memory: dict | None = None,
+    recent_context: str = "",
+    start_gate_review: dict | None = None,
+):
+    if not isinstance(strategist_payload, dict):
+        strategist_payload = {}
+    normalized = json.loads(json.dumps(strategist_payload, ensure_ascii=False))
+    action_plan = _normalize_action_plan(normalized.get("action_plan", {}))
+    response_strategy = normalized.get("response_strategy", {})
+    if not isinstance(response_strategy, dict):
+        response_strategy = {}
+    derived_plan = _derive_operation_plan(
+        user_input,
+        analysis_data,
+        action_plan,
+        response_strategy,
+        working_memory if isinstance(working_memory, dict) else {},
+        recent_context,
+        start_gate_review if isinstance(start_gate_review, dict) else {},
+    )
+    existing_plan = normalized.get("operation_plan", {})
+    existing_plan = _normalize_operation_plan(existing_plan if isinstance(existing_plan, dict) else {})
+    existing_has_signal = bool(
+        str(existing_plan.get("user_goal") or "").strip()
+        or str(existing_plan.get("executor_instruction") or "").strip()
+        or existing_plan.get("success_criteria")
+    )
+    if existing_has_signal and existing_plan.get("plan_type") in {
+        "direct_delivery",
+        "warroom_deliberation",
+        "tool_evidence",
+        "recent_dialogue_review",
+        "raw_source_analysis",
+    }:
+        if existing_plan.get("plan_type") == "direct_delivery" and derived_plan.get("plan_type") != "direct_delivery":
+            normalized["operation_plan"] = derived_plan
+            return _sanitize_strategist_goal_fields(normalized, user_input, start_gate_review)
+        if derived_plan.get("plan_type") in {"tool_evidence", "recent_dialogue_review", "raw_source_analysis"} and existing_plan.get("plan_type") != derived_plan.get("plan_type"):
+            normalized["operation_plan"] = derived_plan
+            return _sanitize_strategist_goal_fields(normalized, user_input, start_gate_review)
+        semantic_contract_changed = False
+        if derived_plan.get("output_act") not in {"", "answer"} and existing_plan.get("output_act") != derived_plan.get("output_act"):
+            existing_plan["output_act"] = derived_plan.get("output_act")
+            existing_plan["delivery_shape"] = derived_plan.get("delivery_shape", existing_plan.get("delivery_shape", ""))
+            semantic_contract_changed = True
+        if derived_plan.get("source_lane") not in {"", "none"} and existing_plan.get("source_lane") in {"", "none"}:
+            existing_plan["source_lane"] = derived_plan.get("source_lane")
+            semantic_contract_changed = True
+        if semantic_contract_changed and str(derived_plan.get("evidence_policy") or "").strip():
+            existing_plan["evidence_policy"] = derived_plan.get("evidence_policy", existing_plan.get("evidence_policy", ""))
+        for key in ("executor_instruction", "evidence_policy", "delivery_shape"):
+            if not str(existing_plan.get(key) or "").strip():
+                existing_plan[key] = derived_plan.get(key, "")
+        for key in ("success_criteria", "rejection_criteria"):
+            if not existing_plan.get(key):
+                existing_plan[key] = derived_plan.get(key, [])
+        normalized["operation_plan"] = existing_plan
+        return _sanitize_strategist_goal_fields(normalized, user_input, start_gate_review)
+
+    normalized["operation_plan"] = derived_plan
+    return _sanitize_strategist_goal_fields(normalized, user_input, start_gate_review)
+
+
+def _raw_user_wording_leaked(value: str, user_input: str):
+    value_norm = unicodedata.normalize("NFKC", str(value or "")).strip().lower()
+    user_norm = unicodedata.normalize("NFKC", str(user_input or "")).strip().lower()
+    if not value_norm or not user_norm or len(user_norm) < 12:
+        return False
+    compact_value = re.sub(r"\s+", "", value_norm)
+    compact_user = re.sub(r"\s+", "", user_norm)
+    if compact_user and compact_user in compact_value:
+        return True
+    return len(compact_user) >= 24 and compact_user[:24] in compact_value
+
+
+def _strategist_goal_from_payload_or_contract(
+    strategist_payload: dict,
+    goal_lock: dict,
+    user_input: str,
+    start_gate_review: dict | None = None,
+):
+    start_gate_review = start_gate_review if isinstance(start_gate_review, dict) else {}
+    answer_mode_policy = start_gate_review.get("answer_mode_policy", {})
+    if not isinstance(answer_mode_policy, dict):
+        answer_mode_policy = {}
+    policy_target = _strategist_answer_mode_target_from_policy(answer_mode_policy)
+
+    existing_goal = strategist_payload.get("strategist_goal", {})
+    if not isinstance(existing_goal, dict) or not existing_goal:
+        normalized_goal_alias = strategist_payload.get("normalized_goal", {})
+        existing_goal = normalized_goal_alias if isinstance(normalized_goal_alias, dict) else {}
+    strategist_goal = _normalize_strategist_goal(existing_goal)
+    fallback_goal = _strategist_goal_from_goal_lock(
+        goal_lock,
+        answer_mode_target=policy_target,
+    )
+
+    if (
+        not str(strategist_goal.get("user_goal_core") or "").strip()
+        or _raw_user_wording_leaked(strategist_goal.get("user_goal_core", ""), user_input)
+    ):
+        strategist_goal["user_goal_core"] = fallback_goal.get("user_goal_core", "")
+    if strategist_goal.get("answer_mode_target") == "ambiguous" and policy_target != "ambiguous":
+        strategist_goal["answer_mode_target"] = policy_target
+    if not strategist_goal.get("success_criteria"):
+        strategist_goal["success_criteria"] = fallback_goal.get("success_criteria", [])
+    return _normalize_strategist_goal(strategist_goal)
+
+
+def _sanitize_strategist_goal_fields(
+    strategist_payload: dict,
+    user_input: str,
+    start_gate_review: dict | None = None,
+):
+    normalized = json.loads(json.dumps(strategist_payload if isinstance(strategist_payload, dict) else {}, ensure_ascii=False))
+    derived_goal_lock = _derive_goal_lock_v2(user_input, start_gate_review if isinstance(start_gate_review, dict) else {})
+
+    goal_lock = _normalize_goal_lock(normalized.get("goal_lock", {}))
+    strategist_goal = _strategist_goal_from_payload_or_contract(
+        normalized,
+        derived_goal_lock,
+        user_input,
+        start_gate_review,
+    )
+    strategist_goal_core = str(strategist_goal.get("user_goal_core") or "").strip()
+    goal_lock["user_goal_core"] = strategist_goal_core
+    if (
+        not str(goal_lock.get("answer_shape") or "").strip()
+        or str(derived_goal_lock.get("answer_shape") or "").strip() != "direct_answer"
+    ):
+        goal_lock["answer_shape"] = derived_goal_lock.get("answer_shape", goal_lock.get("answer_shape", "direct_answer"))
+    if derived_goal_lock.get("must_not_expand_to"):
+        goal_lock["must_not_expand_to"] = derived_goal_lock.get("must_not_expand_to", [])
+    normalized["goal_lock"] = goal_lock
+    normalized["strategist_goal"] = strategist_goal
+    normalized["normalized_goal"] = strategist_goal
+
+    action_plan = _normalize_action_plan(normalized.get("action_plan", {}))
+    operation_plan = _normalize_operation_plan(normalized.get("operation_plan", {}))
+    if strategist_goal_core:
+        operation_plan["user_goal"] = strategist_goal_core
+
+    plan_type = str(operation_plan.get("plan_type") or "").strip()
+    step_goal = str(action_plan.get("current_step_goal") or "").strip()
+    if (
+        not step_goal
+        or _raw_user_wording_leaked(step_goal, user_input)
+        or _raw_user_wording_leaked(operation_plan.get("user_goal", ""), user_input)
+    ):
+        if plan_type in {"tool_evidence", "recent_dialogue_review", "raw_source_analysis"}:
+            action_plan["current_step_goal"] = _goal_locked_gathering_step_goal(goal_lock)
+        else:
+            action_plan["current_step_goal"] = _goal_locked_delivery_step_goal(goal_lock)
+
+    normalized["action_plan"] = action_plan
+    normalized["operation_plan"] = operation_plan
+    return normalized
+
+
+def _ensure_war_room_contract_in_strategist_payload(
+    strategist_payload: dict,
+    user_input: str,
+    analysis_data: dict,
+    start_gate_review: dict | None = None,
+):
+    if not isinstance(strategist_payload, dict):
+        strategist_payload = {}
+    normalized = json.loads(json.dumps(strategist_payload, ensure_ascii=False))
+    action_plan = _normalize_action_plan(normalized.get("action_plan", {}))
+    response_strategy = normalized.get("response_strategy", {})
+    if not isinstance(response_strategy, dict):
+        response_strategy = {}
+    existing_contract = normalized.get("war_room_contract", {})
+    existing_contract = _normalize_war_room_operating_contract(existing_contract if isinstance(existing_contract, dict) else {})
+    existing_has_signal = bool(
+        existing_contract.get("freedom", {}).get("granted")
+        or existing_contract.get("reason", {}).get("why_tool_is_not_primary")
+        or existing_contract.get("deficiency", {}).get("missing_items")
+    )
+    if existing_has_signal:
+        normalized["war_room_contract"] = existing_contract
+        return normalized
+
+    normalized["war_room_contract"] = _derive_war_room_operating_contract(
+        user_input,
+        analysis_data,
+        action_plan,
+        response_strategy,
+        start_gate_review=start_gate_review if isinstance(start_gate_review, dict) else {},
+    )
+    return normalized
+
+
+def phase_minus_1a_thinker(state: AnimaState):
+    return _run_phase_minus_1a_thinker(
+        state,
+        previous_phase_minus_1a_thinker=_previous_phase_minus_1a_thinker,
+        ensure_tool_request_in_strategist_payload=_ensure_tool_request_in_strategist_payload,
+        build_strategist_objection_packet=_build_strategist_objection_packet,
+        normalize_operation_plan=_normalize_operation_plan,
+        attach_ledger_event=_attach_ledger_event,
+    )
+
+
+def _extract_explicit_search_keyword(user_input: str):
+    candidate = _shared_extract_explicit_search_phrase(user_input)
+    if candidate:
+        return _clean_explicit_search_fragment(candidate)
+    text = unicodedata.normalize("NFKC", str(user_input or "").strip())
     if not text:
         return ""
-    for marker in ["내가 너", "내가 널", "내가 너를", "나나 너나", "네가 나", "네가 날", "네가 나를"]:
-        idx = text.find(marker)
-        if idx >= 0:
-            return text[idx:idx + 120].strip()
-    return text[:120]
+    match = re.search(r"(?:search|find|look up|\uac80\uc0c9|\ucc3e\uc544)\s+(.+)$", text, flags=re.IGNORECASE)
+    if match:
+        return _clean_explicit_search_fragment(match.group(1))
+    return ""
 
 
-def _enforce_role_fidelity_for_dialogue(analysis_dict: dict, raw_read_report: dict, user_input: str):
-    if not isinstance(analysis_dict, dict):
-        analysis_dict = {}
+def _clean_explicit_search_fragment(fragment: str):
+    text = unicodedata.normalize("NFKC", str(fragment or "").strip())
+    if not text:
+        return ""
+    text = re.sub(r"^\s*(?:please|just|once|search|find|look up|\uac80\uc0c9|\ucc3e\uc544)\s+", "", text, flags=re.IGNORECASE).strip()
+    text = re.split(r"\s*(?:then|and|result|results|tell me|explain|\uacb0\uacfc|\ub9d0\ud574|\uc54c\ub824)\b", text, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    text = re.sub(r"\s+", " ", text).strip(" \"'.,!?()[]{}<>")
+    if not text or len(text) > 80:
+        return ""
+    return text
 
-    raw_text = _raw_dialogue_text_for_role_check(raw_read_report, user_input)
-    if not raw_text:
-        return analysis_dict
 
-    role_sensitive = any(marker in raw_text for marker in ["내가 너", "내가 널", "내가 너를", "나나 너나", "네가 나", "네가 날", "네가 나를"])
-    if not role_sensitive:
-        return analysis_dict
+def _extract_explicit_search_keywords(user_input: str):
+    primary = _extract_explicit_search_keyword(user_input)
+    return [primary] if primary else []
 
-    quote = _extract_role_sensitive_quote(raw_text)
-    evidences = analysis_dict.get("evidences", [])
-    if not isinstance(evidences, list):
-        evidences = []
 
-    direct_quote_evidence = f'직접 발화 근거: "{quote}"'
-    if direct_quote_evidence not in evidences:
-        evidences.insert(0, direct_quote_evidence)
-    analysis_dict["evidences"] = evidences[:8]
+def _supervisor_search_queries(user_input: str, tool_name: str, tool_args: dict, operation_contract: dict | None = None):
+    normalized_tool = str(tool_name or "").strip()
+    if normalized_tool not in {"tool_search_memory", "tool_search_field_memos"}:
+        return []
+    queries = []
+    normalized_contract = _normalize_operation_contract(operation_contract if isinstance(operation_contract, dict) else {})
+    explicit_queries = _extract_explicit_search_keywords(user_input)
+    queries.extend(explicit_queries)
+    keyword = ""
+    if isinstance(tool_args, dict):
+        raw_keyword = str(tool_args.get("keyword") or tool_args.get("query") or "")
+        keyword = _clean_explicit_search_fragment(raw_keyword) or _normalize_search_keyword(raw_keyword)
+    if keyword and not _looks_like_fake_tool_or_meta_string(keyword):
+        queries.insert(0, keyword)
+    query_variant = str(normalized_contract.get("query_variant") or "").strip()
+    if query_variant and not _looks_like_fake_tool_or_meta_string(query_variant):
+        queries.insert(0, query_variant)
+    return _dedupe_keep_order([query for query in queries if query])[:2]
 
-    summary = str(analysis_dict.get("situational_brief") or "").strip()
-    suspicious_flip = any(token in summary for token in ["AI가 사용자를", "AI가 자신을", "사용자를 이상하게", "assistant가 사용자를"])
-    if suspicious_flip or not summary:
-        analysis_dict["situational_brief"] = (
-            f'사용자는 "{quote}"라고 직접 표현하며, 현재 대화가 자신과 assistant 모두 제대로 말을 잇지 못하는 쪽으로 꼬였다고 보고 있습니다.'
-        )
 
-    thought = str(analysis_dict.get("analytical_thought") or "").strip()
-    fidelity_note = "원문에 등장한 화자/대상 관계와 인칭을 뒤집지 말고 그대로 유지해야 합니다."
-    if fidelity_note not in thought:
-        analysis_dict["analytical_thought"] = (
-            f"{fidelity_note} {thought}".strip()
-            if thought else fidelity_note
-        )
+def _build_supervisor_tool_message(tool_name: str, tool_args: dict, user_input: str, operation_contract: dict | None = None):
+    normalized_tool_name = str(tool_name or "").strip()
+    normalized_tool_args = tool_args if isinstance(tool_args, dict) else {}
 
-    return analysis_dict
+    if normalized_tool_name in {"tool_search_memory", "tool_search_field_memos"}:
+        arg_name = "query" if normalized_tool_name == "tool_search_field_memos" else "keyword"
+        exact_query = str(normalized_tool_args.get(arg_name) or "").strip()
+        if not exact_query:
+            other_arg_name = "keyword" if arg_name == "query" else "query"
+            exact_query = str(normalized_tool_args.get(other_arg_name) or "").strip()
+
+        if exact_query:
+            exact_args = dict(normalized_tool_args)
+            exact_args[arg_name] = exact_query
+            if normalized_tool_name == "tool_search_field_memos":
+                try:
+                    exact_args["limit"] = int(exact_args.get("limit", 6) or 6)
+                except (TypeError, ValueError):
+                    exact_args["limit"] = 6
+            return AIMessage(
+                content="",
+                tool_calls=[{"name": normalized_tool_name, "args": exact_args, "id": f"auditor_{normalized_tool_name}_exact"}],
+            )
+
+        # Only fall back to the older query expander when -1a/-1b failed to
+        # provide any usable query at all. Exact strategist args must not be
+        # rewritten by phase 0.
+        queries = _supervisor_search_queries(user_input, normalized_tool_name, normalized_tool_args, operation_contract=operation_contract)
+        if queries:
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": normalized_tool_name,
+                        "args": {arg_name: query},
+                        "id": f"auditor_{normalized_tool_name}_{idx}",
+                    }
+                    for idx, query in enumerate(queries, start=1)
+                ],
+            )
+
+    return AIMessage(
+        content="",
+        tool_calls=[{"name": normalized_tool_name, "args": normalized_tool_args, "id": f"auditor_{normalized_tool_name}"}],
+    )
+
+
+def _is_assistant_investigation_request_turn(user_input: str):
+    return _shared_is_assistant_investigation_request_turn(user_input)
+
+
+def _ops_tool_cards():
+    return [
+        {
+            "tool_name": "tool_search_field_memos",
+            "purpose": "Retrieve curated FieldMemo candidates from prior turns.",
+            "use_when": "Use when the user asks about remembered, previous, or recently taught personal facts.",
+            "avoid_when": "Avoid for pure emotional acknowledgement, public knowledge, or explicit raw-source/date searches.",
+        },
+        {
+            "tool_name": "tool_read_artifact",
+            "purpose": "Read a local document or artifact directly.",
+            "use_when": "Use when artifact_hint or document/PPTX/source reading is required.",
+            "avoid_when": "Avoid for lightweight conversation or direct-answer turns.",
+        },
+        {
+            "tool_name": "tool_search_memory",
+            "purpose": "Run a broad memory/raw-record search when needed.",
+            "use_when": "Use for explicit search keywords, past recall, or record exploration.",
+            "avoid_when": "Avoid when the current turn itself is enough to answer.",
+        },
+        {
+            "tool_name": "tool_scroll_chat_log",
+            "purpose": "Read around a specific recovered chat-log source id.",
+            "use_when": "Use when a concrete target_id exists and surrounding context is needed.",
+            "avoid_when": "Avoid vague recent-conversation summaries without a target id.",
+        },
+        {
+            "tool_name": "tool_read_full_diary",
+            "purpose": "Read the diary entry for a specific date.",
+            "use_when": "Use when a date-specific diary recall is requested.",
+            "avoid_when": "Avoid for undated general conversation or document search.",
+        },
+    ]
+
+
+def _ops_node_cards():
+    return [
+        {
+            "node_name": "phase_3",
+            "responsibility": "Direct answer, continuation, suggestion, creative/social delivery.",
+            "route_when": "Use when the turn can be answered now or already has an approved payload.",
+        },
+        {
+            "node_name": "-1a_thinker",
+            "responsibility": "Plan shaping, question narrowing, tool planning.",
+            "route_when": "Use when question structure or planning must be clarified first.",
+        },
+        {
+            "node_name": "phase_2a",
+            "responsibility": "Read raw source or recent dialogue input.",
+            "route_when": "Use when raw-read evidence is primary.",
+        },
+    ]
+
+
+def _plan_reasoning_budget(user_input: str, recent_context: str, working_memory: dict):
+    text = str(user_input or "").strip()
+    artifact_hint = _extract_artifact_hint(text)
+
+
+    if _is_assistant_investigation_request_turn(text):
+        if artifact_hint:
+            return {
+                "reasoning_budget": 2,
+                "preferred_path": "tool_first",
+                "should_use_tools": True,
+                "rationale": "The user explicitly asked the assistant to investigate, so source/tool checking may be needed before final delivery.",
+            }
+        if _is_recent_dialogue_review_turn(text, recent_context):
+            return {
+                "reasoning_budget": 2,
+                "preferred_path": "internal_reasoning",
+                "should_use_tools": False,
+                "rationale": "The user asked for recent-dialogue review, so inspect the recent flow before final delivery.",
+            }
+        return {
+            "reasoning_budget": 2,
+            "preferred_path": "internal_reasoning",
+            "should_use_tools": False,
+            "rationale": "The user asked the assistant to think/investigate; plan the answer boundary before final delivery.",
+        }
+
+    return _base_plan_reasoning_budget(user_input, recent_context, working_memory)
+
+
+def _parse_reasoning_budget_value(value):
+    if value is None:
+        return None
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_reasoning_budget(state: AnimaState, reasoning_plan: dict | None = None, default: int = 1):
+    plan = reasoning_plan if isinstance(reasoning_plan, dict) else {}
+    state_plan = state.get("reasoning_plan", {})
+    state_plan_ready = isinstance(state_plan, dict) and bool(state_plan)
+
+    state_budget = _parse_reasoning_budget_value(state.get("reasoning_budget", None))
+    if state_plan_ready and state_budget is not None:
+        return state_budget
+
+    plan_budget = _parse_reasoning_budget_value(plan.get("reasoning_budget", None))
+    if plan_budget is not None:
+        return plan_budget
+
+    legacy_budget = _parse_reasoning_budget_value(plan.get("budget", None))
+    if legacy_budget is not None:
+        return legacy_budget
+
+    if state_budget is not None:
+        return state_budget
+
+    return max(int(default), 0)
+
+
+def _operation_plan_from_state(state: AnimaState, strategist_output: dict | None = None):
+    strategist_output = strategist_output if isinstance(strategist_output, dict) else state.get("strategist_output", {})
+    if not isinstance(strategist_output, dict):
+        strategist_output = {}
+
+    state_plan = state.get("operation_plan", {})
+    if isinstance(state_plan, dict) and state_plan:
+        return _normalize_operation_plan(state_plan)
+
+    strategist_plan = strategist_output.get("operation_plan", {})
+    if isinstance(strategist_plan, dict) and strategist_plan:
+        return _normalize_operation_plan(strategist_plan)
+
+    reasoning_board = state.get("reasoning_board", {})
+    if isinstance(reasoning_board, dict):
+        board_plan = reasoning_board.get("strategist_plan", {})
+        if isinstance(board_plan, dict):
+            nested_plan = board_plan.get("operation_plan", {})
+            if isinstance(nested_plan, dict) and nested_plan:
+                return _normalize_operation_plan(nested_plan)
+
+    action_plan = _normalize_action_plan(strategist_output.get("action_plan", {}))
+    response_strategy = strategist_output.get("response_strategy", {})
+    if not isinstance(response_strategy, dict):
+        response_strategy = state.get("response_strategy", {}) if isinstance(state.get("response_strategy", {}), dict) else {}
+    return _derive_operation_plan(
+        str(state.get("user_input") or ""),
+        state.get("analysis_report", {}) if isinstance(state.get("analysis_report", {}), dict) else {},
+        action_plan,
+        response_strategy,
+        state.get("working_memory", {}) if isinstance(state.get("working_memory", {}), dict) else {},
+        str(state.get("recent_context") or ""),
+        state.get("start_gate_review", {}) if isinstance(state.get("start_gate_review", {}), dict) else {},
+    )
+
+
+def _war_room_seed_alignment_issue(user_input: str, war_room_output: dict, recent_context: str = ""):
+    return _war_room_seed_alignment_issue_impl(
+        user_input,
+        war_room_output,
+        recent_context,
+        user_turn_targets_assistant_reply=_user_turn_targets_assistant_reply,
+    )
+
+
+def _has_usable_response_seed(response_strategy: dict, user_input: str = ""):
+    if not isinstance(response_strategy, dict) or not response_strategy:
+        return False
+    delivery_mode = _normalize_delivery_freedom_mode(
+        str(response_strategy.get("delivery_freedom_mode") or "").strip(),
+        str(response_strategy.get("reply_mode") or "").strip(),
+    )
+    if delivery_mode == "clean_failure":
+        return False
+    direct_seed = str(response_strategy.get("direct_answer_seed") or "").strip()
+    return _has_meaningful_delivery_seed(direct_seed, user_input)
+
+
+def _strategy_supports_direct_phase3(
+    response_strategy: dict,
+    user_input: str = "",
+    recent_context: str = "",
+):
+    if _has_usable_response_seed(response_strategy, user_input):
+        return True
+
+    policy = _answer_mode_policy_for_turn(user_input, recent_context)
+    if bool(policy.get("current_turn_grounding_ready")):
+        return True
+
+    return bool(policy.get("parametric_knowledge_allowed"))
+
+
+def _fallback_war_room_output(user_input: str, operation_plan: dict, response_strategy: dict, war_room_contract: dict, recent_context: str = ""):
+    return _fallback_war_room_output_impl(
+        user_input,
+        operation_plan,
+        response_strategy,
+        war_room_contract,
+        recent_context,
+        looks_like_generic_non_answer_text=_looks_like_generic_non_answer_text,
+        looks_like_user_parroting_report=_looks_like_user_parroting_report,
+        war_room_seed_alignment_issue=_war_room_seed_alignment_issue,
+        is_emotional_vent_turn=_is_emotional_vent_turn,
+    )
+
+
+def phase_warroom_deliberator(state: AnimaState):
+    return _run_phase_warroom_deliberator(
+        state,
+        llm=llm,
+        operation_plan_from_state=_operation_plan_from_state,
+        normalize_action_plan=_normalize_action_plan,
+        working_memory_packet_for_prompt=_working_memory_packet_for_prompt,
+        attach_ledger_event=_attach_ledger_event,
+        war_room_output_is_usable=_war_room_output_is_usable,
+        war_room_seed_alignment_issue=_war_room_seed_alignment_issue,
+        response_strategy_from_war_room_output=_response_strategy_from_war_room_output,
+        fallback_war_room_output=_fallback_war_room_output,
+    )
+
+
+def phase_119_rescue(state: AnimaState):
+    return _run_phase_119_rescue(
+        state,
+        operation_plan_from_state=_operation_plan_from_state,
+        normalize_goal_lock=_normalize_goal_lock,
+        compact_user_facing_summary=_compact_user_facing_summary,
+        dedupe_keep_order=_dedupe_keep_order,
+        clean_failure_missing_items=_clean_failure_missing_items,
+        build_clean_failure_packet=_build_clean_failure_packet,
+        empty_reasoning_board=_empty_reasoning_board,
+        empty_verdict_board=_empty_verdict_board,
+        make_auditor_decision=_make_auditor_decision,
+        normalize_readiness_decision=normalize_readiness_decision,
+        attach_ledger_event=_attach_ledger_event,
+        print_fn=print,
+    )
+
+
+def phase_3_validator(state: AnimaState):
+    return _run_phase_3_validator(
+        state,
+        llm=llm,
+        sanitize_response_strategy_for_phase3=_sanitize_response_strategy_for_phase3,
+        phase3_recent_context_excerpt=_phase3_recent_context_excerpt,
+        phase3_reference_policy=_phase3_reference_policy,
+        build_judge_speaker_packet=_build_judge_speaker_packet,
+        build_phase3_lane_delivery_packet=_build_phase3_lane_delivery_packet,
+        build_phase3_delivery_payload=_build_phase3_delivery_payload,
+        build_phase3_speaker_judge_contract=_build_phase3_speaker_judge_contract,
+        normalize_readiness_decision=normalize_readiness_decision,
+        normalize_user_facing_text=_normalize_user_facing_text,
+        attach_ledger_event=_attach_ledger_event,
+        print_fn=print,
+    )
+
+
+def phase_delivery_review(state: AnimaState):
+    return _run_phase3_delivery_review(
+        state,
+        llm=llm,
+        attach_ledger_event=_attach_ledger_event,
+        print_fn=print,
+    )
+
+
+def phase_minus_1s_start_gate(state: AnimaState):
+    return _run_phase_minus_1s_start_gate(
+        state,
+        plan_reasoning_budget=_plan_reasoning_budget,
+        resolve_reasoning_budget=_resolve_reasoning_budget,
+        fast_start_gate_assessment=_fast_start_gate_assessment,
+        llm_start_gate_turn_contract=_llm_start_gate_turn_contract,
+        build_start_gate_switches=_build_start_gate_switches,
+        make_auditor_decision=_make_auditor_decision,
+        extract_current_turn_grounding_facts=_extract_current_turn_grounding_facts,
+        response_strategy_from_answer_mode_policy=_response_strategy_from_answer_mode_policy,
+        attach_ledger_event=_attach_ledger_event,
+        print_fn=print,
+    )
+
+
+def _start_gate_requests_memory_recall(state: dict | None, user_input: str = ""):
+    state = state if isinstance(state, dict) else {}
+    contract = state.get("start_gate_contract", {})
+    if not isinstance(contract, dict):
+        contract = {}
+    turn_contract = contract.get("turn_contract", {})
+    if not isinstance(turn_contract, dict):
+        switches = state.get("start_gate_switches", {})
+        if isinstance(switches, dict):
+            turn_contract = switches.get("start_gate_turn_contract", {})
+    if isinstance(turn_contract, dict) and turn_contract:
+        intent = str(turn_contract.get("user_intent") or "").strip()
+        answer_mode = str(turn_contract.get("answer_mode_preference") or "").strip()
+        return intent == "requesting_memory_recall" or answer_mode == "grounded_recall"
+
+    answer_mode_policy = contract.get("answer_mode_policy", {})
+    if not isinstance(answer_mode_policy, dict):
+        switches = state.get("start_gate_switches", {})
+        answer_mode_policy = switches.get("answer_mode_policy", {}) if isinstance(switches, dict) else {}
+    if isinstance(answer_mode_policy, dict) and answer_mode_policy:
+        question_class = str(answer_mode_policy.get("question_class") or "").strip()
+        preferred_mode = str(answer_mode_policy.get("preferred_answer_mode") or "").strip()
+        if question_class in {"requesting_memory_recall", "grounded_memory_recall"}:
+            return True
+        if preferred_mode == "grounded_recall":
+            return True
+        if bool(answer_mode_policy.get("direct_delivery_allowed")):
+            return False
+
+    return False
 
 
 def phase_2_analyzer(state: AnimaState):
-    print("[Phase 2b] phase_2a 원문 검토 결과를 바탕으로 구조화 증거철을 작성 중...")
-
-    current_loop = state.get("loop_count", 0)
-    auditor_memo = state.get("self_correction_memo", "")
-    working_memory_packet = _working_memory_packet_for_prompt(state.get("working_memory", {}))
-    raw_read_report = state.get("raw_read_report", {})
-    raw_read_packet = _raw_read_report_packet_for_prompt(raw_read_report)
-    source_relay_packet = _build_source_relay_packet(raw_read_report)
-    source_relay_prompt = _source_relay_packet_for_prompt(source_relay_packet)
-    read_mode = str(raw_read_report.get("read_mode") or "").strip()
-    analysis_mode = (
-        "recent_dialogue_review"
-        if read_mode == "recent_dialogue_review"
-        else "internal_reasoning_only"
-        if read_mode == "current_turn_only"
-        else "tool_grounded"
+    return _run_phase_2_analyzer(
+        state,
+        llm=llm,
+        analysis_report_schema=AnalysisReport,
+        build_phase_2b_prompt=build_phase_2b_prompt,
+        working_memory_packet_for_prompt=_working_memory_packet_for_prompt,
+        raw_read_report_packet_for_prompt=_raw_read_report_packet_for_prompt,
+        build_source_relay_packet=_build_source_relay_packet,
+        source_relay_packet_for_prompt=_source_relay_packet_for_prompt,
+        planned_operation_contract_from_state=_planned_operation_contract_from_state,
+        normalize_execution_trace=_normalize_execution_trace,
+        tool_carryover_from_state=_tool_carryover_from_state,
+        evidence_ledger_for_prompt=evidence_ledger_for_prompt,
+        normalize_analysis_with_source_relay=_normalize_analysis_with_source_relay,
+        enforce_field_memo_judgments=_enforce_field_memo_judgments,
+        build_reasoning_board_from_analysis=_build_reasoning_board_from_analysis,
+        war_room_from_critic=_war_room_from_critic,
+        execution_trace_after_phase2b=_execution_trace_after_phase2b,
+        attach_ledger_event=_attach_ledger_event,
+        print_fn=print,
     )
 
-    sys_prompt = (
-        "당신은 ANIMA의 2b 검사이자 사실 감사관입니다.\n\n"
-        "phase 2a 원문 검토 보고를 읽고, 그 근거 위에서만 분석 보고서를 작성하라.\n"
-        "반드시 fact-first로 쓰고, 직접 발화의 주어/목적어와 화자 관계를 뒤집지 마라.\n"
-        "특히 user_input이나 raw_read_report에 '내가/너를/나나 너나' 같은 표현이 있으면, 최소 한 개 이상의 직접 인용 근거를 evidences에 넣어라.\n"
-        "당신의 임무는 진단이지 다음 도구 계획이 아니다. 인식적 결핍이 무엇인지 분명하게 적어라.\n"
-        "모든 자유서술 필드는 한국어로 작성하라.\n\n"
-        f"[analysis_mode]\n{analysis_mode}\n\n"
-        f"[user_input]\n{state['user_input']}\n\n"
-        f"[raw_read_report]\n{raw_read_packet}\n\n"
-        f"[auditor_memo]\n{auditor_memo if auditor_memo else 'N/A'}\n\n"
-        f"[working_memory]\n{working_memory_packet}\n\n"
-        f"[source_relay_packet]\n{source_relay_prompt}\n\n"
-        "[phase_2b_source_contract]\n"
-        "- phase_2a가 넘긴 모든 source packet에 대해 source_judgments를 작성하라.\n"
-        "- 각 source_judgment에는 source_status, accepted_facts, objection_reason, missing_info, search_needed가 들어가야 한다.\n"
-        "- must_forward_facts는 반드시 릴레이되어야 하는 직접 관찰 사실이다. 존재한다면 비판보다 먼저 accepted_facts와 evidences에 반영하라.\n"
-        "- situational_brief는 fact-first로 작성하라. 사용자 태도 평가는 source facts와 source judgments 이후에만 덧붙여라.\n\n"
-        "규칙:\n"
-        "1. evidences는 구체적이고 source-grounded여야 한다.\n"
-        "2. analytical_thought는 비판적이어도 되지만 반드시 evidences에 묶여 있어야 한다.\n"
-        "3. 직접 발화의 인칭을 3인칭 일반론으로 바꾸는 과정에서 주어/목적어를 뒤집지 마라.\n"
-        "4. 현재 근거로 답변이 가능할 때만 COMPLETED를 사용하라.\n"
-        "5. 직접 근거가 비면 INCOMPLETE를 사용하라.\n"
-        "6. 더 읽거나 확인해야 종결할 수 있을 때만 EXPANSION_REQUIRED를 사용하라.\n"
-        "7. 다음 도구를 계획하지 말고, 어떤 인식적 결핍이 있는지만 적어라.\n"
-        "8. phase_2a가 읽지 않은 raw fact를 새로 만들지 마라.\n"
-        "9. internal_reasoning_only 모드에서 바로 답할 수 있다면 memory search를 강요하지 마라.\n"
-        "10. recent_dialogue_review 모드에서는 raw_read_report.items에 담긴 실제 최근 대화 턴을 직접 근거로 사용하라.\n"
+
+# ==========================================================
+# Canonical active bindings
+# ==========================================================
+_is_recent_dialogue_review_turn = _shared_is_recent_dialogue_review_turn
+_is_assistant_question_request_turn = _shared_is_assistant_question_request_turn
+_is_directive_or_correction_turn = _shared_is_directive_or_correction_turn
+_is_initiative_request_turn = _shared_is_initiative_request_turn
+def _classify_requested_assistant_move(user_input: str, recent_context: str = ""):
+    del user_input, recent_context
+    return ""
+phase_2a_reader = _base_phase_2a_reader
+
+
+
+# ==========================================================
+# Simplified active overrides
+# ==========================================================
+def _is_followup_offer_acceptance_turn(user_input: str, working_memory: dict):
+    return _is_followup_offer_acceptance_turn_impl(
+        user_input,
+        working_memory,
+        extract_artifact_hint=_extract_artifact_hint,
+        extract_explicit_search_keyword=_extract_explicit_search_keyword,
+        is_assistant_investigation_request_turn=_is_assistant_investigation_request_turn,
+        is_creative_story_request_turn=_is_creative_story_request_turn,
+        is_directive_or_correction_turn=_shared_is_directive_or_correction_turn,
     )
 
-    structured_llm = llm.with_structured_output(AnalysisReport)
-    try:
-        response_obj = structured_llm.invoke([
-            SystemMessage(content=sys_prompt),
-            HumanMessage(content=state["user_input"]),
-        ])
-        analysis_dict = _normalize_analysis_with_source_relay(response_obj.model_dump(), source_relay_packet)
-        analysis_dict = _enforce_recent_dialogue_review_analysis(analysis_dict, raw_read_report)
-        analysis_dict = _enforce_role_fidelity_for_dialogue(analysis_dict, raw_read_report, state["user_input"])
-        reasoning_board = _build_reasoning_board_from_analysis(state, analysis_dict)
-        status = analysis_dict.get("investigation_status", "UNKNOWN")
-        brief = analysis_dict.get("situational_brief", "")
-        print(f"  [Phase 2b] 상태={status} | 요약={brief[:120]}")
-        fake_ai_message = AIMessage(content=json.dumps(analysis_dict, ensure_ascii=False))
-    except Exception as e:
-        print(f"[Phase 2b] 구조화 출력 예외: {e}")
-        analysis_dict = {
-            "evidences": [],
-            "source_judgments": [],
-            "analytical_thought": "구조화 출력이 실패하여 2차 fallback 분석 문구를 사용합니다.",
-            "situational_brief": "구조화 출력 실패로 인해 2차 fallback 경로가 사용되었습니다.",
-            "investigation_status": "INCOMPLETE",
-        }
-        analysis_dict = _enforce_role_fidelity_for_dialogue(analysis_dict, raw_read_report, state["user_input"])
-        reasoning_board = _build_reasoning_board_from_analysis(state, analysis_dict)
-        fake_ai_message = AIMessage(content="phase_2_fallback_seed")
 
-    war_room = _war_room_from_critic(state, analysis_dict, raw_read_report)
-    return {
-        "analysis_report": analysis_dict,
-        "reasoning_board": reasoning_board,
-        "war_room": war_room,
-        "loop_count": current_loop + 1,
-        "messages": [fake_ai_message],
-    }
+def _recent_context_anchor_query(recent_context: str, working_memory: dict | None = None):
+    return _recent_context_anchor_query_impl(
+        recent_context,
+        working_memory,
+        extract_recent_raw_turns_from_context=_extract_recent_raw_turns_from_context,
+        extract_search_anchor_terms_from_text=_extract_search_anchor_terms_from_text,
+        temporal_context_allows_carry_over=_temporal_context_allows_carry_over,
+        query_from_anchor_terms=_query_from_anchor_terms,
+    )
+
+
+def _compiled_memory_recall_queries(
+    user_input: str,
+    recent_context: str = "",
+    working_memory: dict | None = None,
+    strategist_output: dict | None = None,
+    analysis_data: dict | None = None,
+    tool_carryover: dict | None = None,
+):
+    return _compiled_memory_recall_queries_impl(
+        user_input,
+        recent_context=recent_context,
+        working_memory=working_memory,
+        strategist_output=strategist_output,
+        analysis_data=analysis_data,
+        tool_carryover=tool_carryover,
+        is_memory_state_disclosure_turn=is_memory_state_disclosure_turn,
+        looks_like_current_turn_memory_story_share=_looks_like_current_turn_memory_story_share,
+        looks_like_memo_recall_turn=looks_like_memo_recall_turn,
+        extract_explicit_search_keyword=_extract_explicit_search_keyword,
+        looks_like_deictic_memory_query=_looks_like_deictic_memory_query,
+        deterministic_search_keyword_from_user_input=_deterministic_search_keyword_from_user_input,
+        extract_search_anchor_terms_from_text=_extract_search_anchor_terms_from_text,
+        query_from_anchor_terms=_query_from_anchor_terms,
+        recent_context_anchor_query=_recent_context_anchor_query,
+        temporal_context_allows_carry_over=_temporal_context_allows_carry_over,
+        clean_strategist_search_fragment=_clean_strategist_search_fragment,
+        normalize_search_keyword=_normalize_search_keyword,
+        search_query_is_overbroad_or_instruction=_search_query_is_overbroad_or_instruction,
+        is_generic_continue_seed=_is_generic_continue_seed,
+        looks_like_generic_non_answer_text=_looks_like_generic_non_answer_text,
+        looks_like_fake_tool_or_meta_string=_looks_like_fake_tool_or_meta_string,
+    )
+
+
+def _deterministic_strategist_tool_request_from_context(
+    user_input: str,
+    working_memory: dict | None = None,
+    *,
+    tool_carryover: dict | None = None,
+):
+    return _deterministic_strategist_tool_request_from_context_impl(
+        user_input,
+        working_memory,
+        tool_carryover=tool_carryover,
+        is_memory_state_disclosure_turn=is_memory_state_disclosure_turn,
+        looks_like_scroll_followup_turn=_looks_like_scroll_followup_turn,
+        tool_carryover_anchor_id=_tool_carryover_anchor_id,
+        scroll_direction_from_user_input=_scroll_direction_from_user_input,
+        deterministic_search_keyword_from_user_input=_deterministic_search_keyword_from_user_input,
+    )
+
+
+def _strategist_tool_request_from_context(
+    user_input: str,
+    analysis_data: dict,
+    working_memory: dict,
+    *,
+    recent_context: str = "",
+    start_gate_switches: dict | None = None,
+    tool_carryover: dict | None = None,
+):
+    return _strategist_tool_request_from_context_impl(
+        user_input,
+        analysis_data,
+        working_memory,
+        recent_context=recent_context,
+        start_gate_switches=start_gate_switches,
+        tool_carryover=tool_carryover,
+        llm=llm,
+        valid_strategist_tool_request=_valid_strategist_tool_request,
+        is_memory_state_disclosure_turn=is_memory_state_disclosure_turn,
+        looks_like_scroll_followup_turn=_looks_like_scroll_followup_turn,
+        tool_carryover_anchor_id=_tool_carryover_anchor_id,
+        scroll_direction_from_user_input=_scroll_direction_from_user_input,
+        compiled_memory_recall_queries=_compiled_memory_recall_queries,
+        logger=print,
+    )
+
