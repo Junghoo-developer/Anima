@@ -6,7 +6,7 @@
 > The field loop (day) operates the persona every turn; the midnight government (night) evolves the persona every day.
 > A *plan-execute-critique* trio recurses at every layer.
 
-[![Tests](https://img.shields.io/badge/tests-294%20passing-brightgreen)]() [![V4 §1-A](https://img.shields.io/badge/V4%20%C2%A71--A-LIVE-blue)]() [![Phase](https://img.shields.io/badge/Phase-1-blueviolet)]()
+[![Tests](https://img.shields.io/badge/tests-294%20passing-brightgreen)]() [![V4 §1-A](https://img.shields.io/badge/V4%20%C2%A71--A-LIVE-blue)]() [![Phase](https://img.shields.io/badge/Phase-1-blueviolet)]() [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.10-blue)]()
 
 ---
 
@@ -225,7 +225,9 @@ Core documents are provided in both Korean and English:
 
 ## 10. License
 
-This project is Junghoo (Junghoo-developer)'s personal research project. For external contribution, commercial use, or forks, please contact Junghoo directly.
+[MIT License](LICENSE) — anyone may freely use, modify, and redistribute. The copyright notice and license text must be preserved.
+
+This project started as Junghoo (Junghoo-developer)'s personal research. External contributions and discussion are welcome.
 
 ---
 

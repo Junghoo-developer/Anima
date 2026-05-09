@@ -6,7 +6,7 @@
 > 현장 루프(낮)가 매 턴 인격을 작동시키고, 심야 정부(밤)가 매일 인격을 진화시킨다.
 > 어느 층에서나 *계획-실행-비판* 트리오가 재귀한다.
 
-[![Tests](https://img.shields.io/badge/tests-294%20passing-brightgreen)]() [![V4 §1-A](https://img.shields.io/badge/V4%20%C2%A71--A-LIVE-blue)]() [![Phase](https://img.shields.io/badge/Phase-1-blueviolet)]()
+[![Tests](https://img.shields.io/badge/tests-294%20passing-brightgreen)]() [![V4 §1-A](https://img.shields.io/badge/V4%20%C2%A71--A-LIVE-blue)]() [![Phase](https://img.shields.io/badge/Phase-1-blueviolet)]() [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.10-blue)]()
 
 ---
 
@@ -225,7 +225,9 @@ py -3.10 -m pytest
 
 ## 10. 라이선스 (License)
 
-본 프로젝트는 정후 (Junghoo-developer) 개인 연구 프로젝트. 외부 기여 / 상업적 사용 / fork 시 정후에게 직접 문의.
+[MIT License](LICENSE) — 누구나 자유롭게 사용/수정/재배포 가능. 단 저작권 표기 + 라이선스 사본 보존 의무.
+
+본 프로젝트는 정후 (Junghoo-developer) 개인 연구 프로젝트로 시작. 외부 기여/논의 환영.
 
 ---
 
