@@ -1,3 +1,5 @@
+*[한국어](ANIMA_FIELD_LOOP_V4_CONSTITUTION.md) | [English](ANIMA_FIELD_LOOP_V4_CONSTITUTION.en.md)*
+
 # ANIMA Field Loop V4 — Constitution (헌법)
 
 **작성일**: 2026-05-02
