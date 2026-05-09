@@ -1,10 +1,5 @@
 *[한국어](ANIMA_State_Optimization_Checklist.md) | [English](ANIMA_State_Optimization_Checklist.en.md)*
 
-# ANIMA State 최적화 체크리스트 (LIVE STATUS — 영문 본문)
-
-> 본 문서는 Codex 작업 로그 (LIVE STATUS) 라서 영문 본문 그대로 유지. 한국어 번역은 정후 별도 결재 시 박음.
-> 갱신: state projection, prompt 압축, turn-lived cleanup, memory contamination 통제 작업 후.
-
 # ANIMA State Optimization Checklist
 
 > Document status: LIVE STATUS / TODO.

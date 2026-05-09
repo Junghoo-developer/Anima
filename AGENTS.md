@@ -1,3 +1,5 @@
+*[한국어](AGENTS.md) | [English](AGENTS.en.md)*
+
 # AGENTS.md — Codex / AI 협업자 작업 규칙
 
 이 저장소에서 Codex 또는 다른 AI 협업자가 따라야 하는 운영 규칙.

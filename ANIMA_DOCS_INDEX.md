@@ -1,3 +1,5 @@
+*[한국어](ANIMA_DOCS_INDEX.md) | [English](ANIMA_DOCS_INDEX.en.md)*
+
 # ANIMA Documents Index
 
 Created: 2026-05-01
