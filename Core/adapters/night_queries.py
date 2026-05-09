@@ -3,7 +3,11 @@
 from collections.abc import Callable
 
 from Core.adapters import neo4j_connection
-from Core.midnight.future.dreamhint_persistence import fetch_active_dreamhints
+from Core.midnight.future.dreamhint_persistence import (
+    ACTIVE_DREAMHINT_WHERE,
+    DREAMHINT_PROPERTY_KEYS,
+    fetch_active_dreamhints,
+)
 
 
 def _rows(result):
@@ -186,33 +190,33 @@ def recall_active_dreamhints(
                 rows = _rows(
                     session.run(
                         """
-                        MATCH (dh:DreamHint)
-                        WHERE coalesce(dh.archive_at, 9999999999999) > timestamp()
-                          AND coalesce(dh.expires_at, 9999999999999) > timestamp()
+                        MATCH (dh)
+                        WHERE """ + ACTIVE_DREAMHINT_WHERE + """
                           AND (
-                            toLower(coalesce(dh.hint_text, '')) CONTAINS toLower($kw)
-                            OR toLower(coalesce(dh.branch_path, '')) CONTAINS toLower($kw)
+                            toLower(coalesce(dh[$hint_text_key], '')) CONTAINS toLower($kw)
+                            OR toLower(coalesce(dh[$branch_path_key], '')) CONTAINS toLower($kw)
                           )
-                        RETURN dh.dreamhint_key AS key, dh.hint_text AS hint,
-                               dh.source_persona AS persona, dh.branch_path AS branch_path
-                        ORDER BY coalesce(dh.created_at, 0) DESC LIMIT $limit
+                        RETURN dh[$dreamhint_key_key] AS key, dh[$hint_text_key] AS hint,
+                               dh[$source_persona_key] AS persona, dh[$branch_path_key] AS branch_path
+                        ORDER BY coalesce(dh[$created_at_key], 0) DESC LIMIT $limit
                         """,
                         kw=kw,
                         limit=lim,
+                        **DREAMHINT_PROPERTY_KEYS,
                     )
                 )
             else:
                 rows = _rows(
                     session.run(
                         """
-                        MATCH (dh:DreamHint)
-                        WHERE coalesce(dh.archive_at, 9999999999999) > timestamp()
-                          AND coalesce(dh.expires_at, 9999999999999) > timestamp()
-                        RETURN dh.dreamhint_key AS key, dh.hint_text AS hint,
-                               dh.source_persona AS persona, dh.branch_path AS branch_path
-                        ORDER BY coalesce(dh.created_at, 0) DESC LIMIT $limit
+                        MATCH (dh)
+                        WHERE """ + ACTIVE_DREAMHINT_WHERE + """
+                        RETURN dh[$dreamhint_key_key] AS key, dh[$hint_text_key] AS hint,
+                               dh[$source_persona_key] AS persona, dh[$branch_path_key] AS branch_path
+                        ORDER BY coalesce(dh[$created_at_key], 0) DESC LIMIT $limit
                         """,
                         limit=lim,
+                        **DREAMHINT_PROPERTY_KEYS,
                     )
                 )
     except Exception as exc:

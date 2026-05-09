@@ -54,29 +54,44 @@ def build_dreamhint_payload(
 
 
 ACTIVE_DREAMHINT_WHERE = (
-    "coalesce(dh.archive_at, 9999999999999) > timestamp() "
-    "AND coalesce(dh.expires_at, 9999999999999) > timestamp()"
+    "'DreamHint' IN labels(dh) "
+    "AND coalesce(dh[$archive_at_key], 9999999999999) > timestamp() "
+    "AND coalesce(dh[$expires_at_key], 9999999999999) > timestamp()"
 )
+
+
+DREAMHINT_PROPERTY_KEYS = {
+    "dreamhint_key_key": "dreamhint_key",
+    "hint_text_key": "hint_text",
+    "source_persona_key": "source_persona",
+    "branch_path_key": "branch_path",
+    "created_at_key": "created_at",
+    "expires_at_key": "expires_at",
+    "archive_at_key": "archive_at",
+}
 
 
 def build_active_dreamhint_query(*, branch_path: str | None = None, limit: int = 12) -> tuple[str, dict[str, Any]]:
     """Build the field-loop query for active DreamHint advisory records."""
     where_parts = [ACTIVE_DREAMHINT_WHERE]
-    params: dict[str, Any] = {"limit": max(1, min(int(limit or 12), 50))}
+    params: dict[str, Any] = {
+        "limit": max(1, min(int(limit or 12), 50)),
+        **DREAMHINT_PROPERTY_KEYS,
+    }
     if _norm(branch_path):
-        where_parts.append("dh.branch_path = $branch_path")
+        where_parts.append("dh[$branch_path_key] = $branch_path")
         params["branch_path"] = _norm(branch_path)
     query = f"""
-    MATCH (dh:DreamHint)
+    MATCH (dh)
     WHERE {' AND '.join(where_parts)}
-    RETURN dh.dreamhint_key AS dreamhint_key,
-           dh.hint_text AS hint_text,
-           dh.source_persona AS source_persona,
-           dh.branch_path AS branch_path,
-           dh.created_at AS created_at,
-           dh.expires_at AS expires_at,
-           dh.archive_at AS archive_at
-    ORDER BY coalesce(dh.created_at, 0) DESC
+    RETURN dh[$dreamhint_key_key] AS dreamhint_key,
+           dh[$hint_text_key] AS hint_text,
+           dh[$source_persona_key] AS source_persona,
+           dh[$branch_path_key] AS branch_path,
+           dh[$created_at_key] AS created_at,
+           dh[$expires_at_key] AS expires_at,
+           dh[$archive_at_key] AS archive_at
+    ORDER BY coalesce(dh[$created_at_key], 0) DESC
     LIMIT $limit
     """
     return query, params
@@ -150,6 +165,7 @@ def persist_dreamhint(session: Any, dreamhint: Mapping[str, Any], graph_operatio
 
 __all__ = [
     "ACTIVE_DREAMHINT_WHERE",
+    "DREAMHINT_PROPERTY_KEYS",
     "build_active_dreamhint_query",
     "build_dreamhint_payload",
     "fetch_active_dreamhints",
