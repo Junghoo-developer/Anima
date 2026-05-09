@@ -187,8 +187,14 @@ def _phase119_trigger(state: dict[str, Any]) -> str:
         if verdict == "sos_119" or target == "119":
             return "delivery_loop"
     s_packet = state.get("s_thinking_packet", {})
-    routing = s_packet.get("routing_decision", {}) if isinstance(s_packet, dict) else {}
-    if isinstance(routing, dict) and str(routing.get("next_node") or "").strip() == "119":
+    if isinstance(s_packet, dict):
+        next_node = str(s_packet.get("next_node") or "").strip()
+        routing = s_packet.get("routing_decision", {})
+        if not next_node and isinstance(routing, dict):
+            next_node = str(routing.get("next_node") or "").strip()
+    else:
+        next_node = ""
+    if next_node in {"119", "phase_119"}:
         return "s_sos"
     return "budget_exceeded"
 

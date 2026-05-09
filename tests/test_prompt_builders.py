@@ -25,24 +25,27 @@ class PromptBuilderTests(unittest.TestCase):
             tolerance=0.5,
             bio_status="stable",
             songryeon_thoughts="thoughts",
-            tactical_briefing="brief",
             working_memory_packet="wm",
             tool_carryover_packet="carry",
             strategist_goal_packet='{"user_goal_core":"answer compactly"}',
             start_gate_review_packet="gate",
             answer_mode_policy_packet='{"preferred_answer_mode":"public_parametric_knowledge"}',
-            reasoning_board_packet="board",
+            fact_cells_packet='[{"fact_id":"f1","extracted_fact":"verified"}]',
             auditor_memo="memo",
-            analysis_packet="analysis",
-            raw_read_packet="raw",
             war_room_packet="war",
         )
         self.assertIn("Do not pass the whole user sentence as a search query", prompt)
         self.assertIn("[user_input]\n질문", prompt)
         self.assertIn("[answer_mode_policy]\n{\"preferred_answer_mode\":\"public_parametric_knowledge\"}", prompt)
+        self.assertIn("[fact_cells]\n[{\"fact_id\":\"f1\",\"extracted_fact\":\"verified\"}]", prompt)
         self.assertIn("[strategist_goal]\n{\"user_goal_core\":\"answer compactly\"}", prompt)
         self.assertIn("goal_contract -> strategist_goal -> action_plan", prompt)
+        self.assertIn("ThinkingHandoff.v1", prompt)
         self.assertIn("public_parametric_knowledge", prompt)
+        self.assertNotIn("[analysis_report]", prompt)
+        self.assertNotIn("[raw_read_report]", prompt)
+        self.assertNotIn("[reasoning_board]", prompt)
+        self.assertNotIn("[tactical_briefing]", prompt)
         self.assertNotIn("Rules:\n1. Treat phase_2", prompt)
 
     def test_phase_2b_prompt_deprecates_answer_shaped_field_memo_brief(self):

@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from ..runtime.context_packet import build_cumulative_s_thinking_packet
+from .packets import compact_analysis_for_prompt
 
 
 def _string_list(values: Any, *, limit: int = 6) -> list[str]:
@@ -49,6 +50,85 @@ def _thinking_domain(turn_contract: dict[str, Any], answer_mode_policy: dict[str
     return "ambiguous"
 
 
+def _dedupe_keep_order(values: list[str], *, limit: int = 10) -> list[str]:
+    result: list[str] = []
+    seen = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _handoff_next_node(value: str) -> str:
+    target = str(value or "").strip()
+    if target in {"119", "phase_119"}:
+        return "phase_119"
+    if target in {"phase_3", "delivery"}:
+        return "phase_3"
+    if target in {"-1a", "-1a_thinker", "plan_with_strategist"}:
+        return "-1a"
+    return "-1a"
+
+
+def _analysis_known_facts(analysis_report: Any, *, limit: int = 10) -> list[str]:
+    analysis = analysis_report if isinstance(analysis_report, dict) else {}
+    facts: list[str] = []
+    evidences = analysis.get("evidences", [])
+    if isinstance(evidences, list):
+        for item in evidences:
+            if isinstance(item, dict):
+                facts.append(str(item.get("extracted_fact") or item.get("fact") or "").strip())
+            else:
+                facts.append(str(item or "").strip())
+    source_judgments = analysis.get("source_judgments", [])
+    if isinstance(source_judgments, list):
+        for judgment in source_judgments:
+            if isinstance(judgment, dict):
+                facts.extend(str(fact or "").strip() for fact in judgment.get("accepted_facts", []) or [])
+    usable_memo = analysis.get("usable_field_memo_facts", [])
+    if isinstance(usable_memo, list):
+        facts.extend(str(fact or "").strip() for fact in usable_memo)
+    accepted = analysis.get("accepted_facts", [])
+    if isinstance(accepted, list):
+        facts.extend(str(fact or "").strip() for fact in accepted)
+    return _dedupe_keep_order([fact for fact in facts if fact], limit=limit)
+
+
+def _analysis_missing_items(analysis_report: Any, *, limit: int = 8) -> list[str]:
+    analysis = analysis_report if isinstance(analysis_report, dict) else {}
+    missing: list[str] = []
+    for key in ("missing_slots", "unfilled_slots", "unresolved_questions"):
+        values = analysis.get(key, [])
+        if isinstance(values, list):
+            missing.extend(str(value or "").strip() for value in values)
+        elif str(values or "").strip():
+            missing.append(str(values or "").strip())
+    return _dedupe_keep_order([item for item in missing if item], limit=limit)
+
+
+def _analysis_evidence_state(analysis_report: Any) -> str:
+    analysis = analysis_report if isinstance(analysis_report, dict) else {}
+    if not analysis:
+        return ""
+    packet = compact_analysis_for_prompt(analysis, role="-1s")
+    parts = []
+    for key in ("investigation_status", "contract_status", "situational_brief"):
+        text = str(packet.get(key) or "").strip() if isinstance(packet, dict) else ""
+        if text:
+            parts.append(f"{key}={text}")
+    if isinstance(packet, dict):
+        parts.append(f"can_answer_user_goal={bool(packet.get('can_answer_user_goal'))}")
+        missing = packet.get("missing_slots", [])
+        if isinstance(missing, list) and missing:
+            parts.append("missing_slots=" + ", ".join(str(item) for item in missing[:4]))
+    return "; ".join(parts)
+
+
 def _build_s_thinking_packet(
     *,
     start_gate_contract: dict[str, Any],
@@ -57,6 +137,7 @@ def _build_s_thinking_packet(
     reasoning_plan: dict[str, Any],
     next_node: str,
     route_reason: str,
+    analysis_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     turn_contract = start_gate_contract.get("turn_contract", {})
     if not isinstance(turn_contract, dict):
@@ -85,42 +166,41 @@ def _build_s_thinking_packet(
     )
     if not key_facts_needed and bool(start_gate_contract.get("requires_grounding")):
         key_facts_needed = ["direct evidence required by the start-gate contract"]
-
-    suggested_focus = (
-        "prepare direct delivery from the approved current contract"
-        if next_node == "phase_3"
-        else "plan the next action from the normalized goal and evidence boundary"
-    )
+    analysis_facts = _analysis_known_facts(analysis_report, limit=8)
+    what_we_know = _dedupe_keep_order(current_turn_facts + analysis_facts, limit=10)
+    gaps = _dedupe_keep_order(gaps + _analysis_missing_items(analysis_report, limit=6), limit=8)
     avoid = [
         "do not write tool names or queries in -1s",
         "do not copy raw user wording as the goal",
         "do not write final answer text in -1s",
+        "do not bypass 2b fact judgment",
     ]
+    handoff_target = _handoff_next_node(next_node)
+    evidence_parts = [
+        f"current_turn_facts={len(current_turn_facts)}",
+        f"requires_grounding={bool(start_gate_contract.get('requires_grounding'))}",
+        f"reasoning_budget={reasoning_plan.get('reasoning_budget', '')}",
+    ]
+    analysis_state = _analysis_evidence_state(analysis_report)
+    if analysis_state:
+        evidence_parts.append(f"analysis_report={analysis_state}")
 
     return {
-        "schema": "SThinkingPacket.v1",
-        "situation_thinking": {
-            "user_intent": str(start_gate_contract.get("user_intent") or turn_contract.get("user_intent") or "").strip(),
-            "domain": _thinking_domain(turn_contract, answer_mode_policy),
-            "key_facts_needed": key_facts_needed,
-        },
-        "loop_summary": {
-            "attempted_so_far": attempted,
-            "current_evidence_state": (
-                f"current_turn_facts={len(current_turn_facts)}; "
-                f"requires_grounding={bool(start_gate_contract.get('requires_grounding'))}; "
-                f"reasoning_budget={reasoning_plan.get('reasoning_budget', '')}"
-            ),
-            "gaps": gaps,
-        },
-        "next_direction": {
-            "suggested_focus": suggested_focus,
-            "avoid": avoid,
-        },
-        "routing_decision": {
-            "next_node": next_node,
-            "reason": str(route_reason or "").strip(),
-        },
+        "schema": "ThinkingHandoff.v1",
+        "producer": "-1s",
+        "recipient": handoff_target,
+        "goal_state": str(
+            start_gate_contract.get("normalized_goal")
+            or turn_contract.get("normalized_goal")
+            or _thinking_domain(turn_contract, answer_mode_policy)
+            or ""
+        ).strip(),
+        "evidence_state": "; ".join(part for part in evidence_parts if str(part).strip()),
+        "what_we_know": what_we_know,
+        "what_is_missing": gaps or key_facts_needed,
+        "next_node": handoff_target,
+        "next_node_reason": str(route_reason or "").strip(),
+        "constraints_for_next_node": _dedupe_keep_order(avoid, limit=6),
     }
 
 
@@ -197,13 +277,38 @@ def run_phase_minus_1s_start_gate(
     reasoning_budget = resolve_reasoning_budget(state, reasoning_plan)
 
     start_gate_review = fast_start_gate_assessment(user_input, recent_context, working_memory, reasoning_plan)
-    start_gate_turn_contract = llm_start_gate_turn_contract(
-        user_input,
-        recent_context,
-        working_memory,
-        reasoning_plan,
-        incoming_s_thinking_history,
-    )
+    try:
+        start_gate_turn_contract = llm_start_gate_turn_contract(
+            user_input,
+            recent_context,
+            working_memory,
+            reasoning_plan,
+            incoming_s_thinking_history,
+            analysis_report=state.get("analysis_report", {}),
+            tactical_briefing=state.get("tactical_briefing", ""),
+        )
+    except TypeError as exc:
+        if "analysis_report" not in str(exc) and "tactical_briefing" not in str(exc):
+            raise
+        try:
+            start_gate_turn_contract = llm_start_gate_turn_contract(
+                user_input,
+                recent_context,
+                working_memory,
+                reasoning_plan,
+                incoming_s_thinking_history,
+                analysis_report=state.get("analysis_report", {}),
+            )
+        except TypeError as inner_exc:
+            if "analysis_report" not in str(inner_exc):
+                raise
+            start_gate_turn_contract = llm_start_gate_turn_contract(
+                user_input,
+                recent_context,
+                working_memory,
+                reasoning_plan,
+                incoming_s_thinking_history,
+            )
     start_gate_switches = build_start_gate_switches(
         user_input,
         recent_context,
@@ -235,6 +340,7 @@ def run_phase_minus_1s_start_gate(
             reasoning_plan=reasoning_plan,
             next_node="119",
             route_reason=memo,
+            analysis_report=state.get("analysis_report", {}),
         )
         s_thinking_history = build_cumulative_s_thinking_packet(
             current=s_thinking_packet,
@@ -269,6 +375,7 @@ def run_phase_minus_1s_start_gate(
             reasoning_plan=reasoning_plan,
             next_node="phase_3",
             route_reason=route_reason,
+            analysis_report=state.get("analysis_report", {}),
         )
         s_thinking_history = build_cumulative_s_thinking_packet(
             current=s_thinking_packet,
@@ -322,6 +429,7 @@ def run_phase_minus_1s_start_gate(
         reasoning_plan=reasoning_plan,
         next_node="-1a",
         route_reason=memo,
+        analysis_report=state.get("analysis_report", {}),
     )
     s_thinking_history = build_cumulative_s_thinking_packet(
         current=s_thinking_packet,

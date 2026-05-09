@@ -102,7 +102,6 @@ class StrategistGoalMigrationTests(unittest.TestCase):
         result = run_phase_minus_1a_thinker(
             {},
             previous_phase_minus_1a_thinker=previous,
-            ensure_tool_request_in_strategist_payload=lambda payload: payload,
             build_strategist_objection_packet=lambda *_args: {},
             normalize_operation_plan=lambda plan: plan,
             attach_ledger_event=lambda result, *_args, **_kwargs: result,

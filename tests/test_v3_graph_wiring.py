@@ -14,6 +14,19 @@ class _NoopSupervisorLlm:
         return self
 
 
+class _ToolSupervisorLlm:
+    def __init__(self, response):
+        self.response = response
+        self.invoked = False
+
+    def bind_tools(self, _tools):
+        return self
+
+    def invoke(self, _messages):
+        self.invoked = True
+        return self.response
+
+
 class V3GraphWiringTests(unittest.TestCase):
     def test_graph_source_no_longer_registers_old_pre_delivery_auditor(self):
         source = inspect.getsource(graph)
@@ -36,7 +49,7 @@ class V3GraphWiringTests(unittest.TestCase):
         state["s_thinking_packet"] = {"routing_decision": {"next_node": "119"}}
         self.assertEqual(graph.route_after_s_thinking(state), "phase_119")
 
-    def test_strategist_routes_tool_request_to_supervisor_otherwise_start_gate(self):
+    def test_strategist_routes_legacy_tool_request_and_source_plan_to_supervisor(self):
         state = empty_anima_state()
         state["strategist_output"] = {
             "tool_request": {
@@ -48,7 +61,7 @@ class V3GraphWiringTests(unittest.TestCase):
         self.assertEqual(graph.route_after_strategist(state), "0_supervisor")
 
         state["strategist_output"] = {"tool_request": {"should_call_tool": False}}
-        self.assertEqual(graph.route_after_strategist(state), "-1s_start_gate")
+        self.assertEqual(graph.route_after_strategist(state), "0_supervisor")
 
     def test_strategist_routes_no_tool_delivery_contract_to_phase3(self):
         state = empty_anima_state()
@@ -61,7 +74,6 @@ class V3GraphWiringTests(unittest.TestCase):
             "action_plan": {"required_tool": ""},
             "delivery_readiness": "deliver_now",
             "convergence_state": "deliverable",
-            "tool_request": {"should_call_tool": False},
             "response_strategy": {
                 "reply_mode": "cautious_minimal",
                 "answer_goal": "Explain the current capability boundary directly.",
@@ -85,7 +97,6 @@ class V3GraphWiringTests(unittest.TestCase):
             "action_plan": {"required_tool": ""},
             "delivery_readiness": "need_reframe",
             "convergence_state": "gathering",
-            "tool_request": {},
             "response_strategy": {
                 "reply_mode": "cautious_minimal",
                 "direct_answer_seed": "With the evidence currently available, I cannot settle that yet.",
@@ -95,7 +106,7 @@ class V3GraphWiringTests(unittest.TestCase):
         state["operation_plan"] = state["strategist_output"]["operation_plan"]
         state["response_strategy"] = state["strategist_output"]["response_strategy"]
 
-        self.assertEqual(graph.route_after_strategist(state), "-1s_start_gate")
+        self.assertEqual(graph.route_after_strategist(state), "0_supervisor")
 
     def test_strategist_keeps_source_plan_without_tool_out_of_phase3(self):
         state = empty_anima_state()
@@ -106,7 +117,6 @@ class V3GraphWiringTests(unittest.TestCase):
                 "output_act": "answer_memory_recall",
             },
             "action_plan": {"required_tool": ""},
-            "tool_request": {"should_call_tool": False},
             "response_strategy": {
                 "reply_mode": "grounded_answer",
                 "answer_goal": "Answer after a memory search.",
@@ -115,7 +125,7 @@ class V3GraphWiringTests(unittest.TestCase):
         state["operation_plan"] = state["strategist_output"]["operation_plan"]
         state["response_strategy"] = state["strategist_output"]["response_strategy"]
 
-        self.assertEqual(graph.route_after_strategist(state), "-1s_start_gate")
+        self.assertEqual(graph.route_after_strategist(state), "0_supervisor")
 
     def test_capability_boundary_question_becomes_no_tool_delivery_contract(self):
         strategist_output, _reasoning_board = nodes._base_fallback_strategist_output(
@@ -144,7 +154,7 @@ class V3GraphWiringTests(unittest.TestCase):
         state["operation_plan"] = strategist_output["operation_plan"]
         state["response_strategy"] = strategist_output["response_strategy"]
 
-        self.assertEqual(strategist_output["tool_request"], {})
+        self.assertNotIn("tool_request", strategist_output)
         self.assertEqual(strategist_output["delivery_readiness"], "deliver_now")
         self.assertIn("memory/source access boundary", strategist_output["action_plan"]["current_step_goal"])
         self.assertEqual(strategist_output["response_strategy"]["direct_answer_seed"], "")
@@ -214,7 +224,7 @@ class V3GraphWiringTests(unittest.TestCase):
         state["execution_status"] = "blocked"
         self.assertEqual(graph.route_after_supervisor(state), "-1s_start_gate")
 
-    def test_supervisor_executes_strategist_tool_request_without_auditor_instruction(self):
+    def test_supervisor_ignores_legacy_strategist_tool_request_and_uses_llm_flow(self):
         state = empty_anima_state()
         state["user_input"] = "search memory"
         state["strategist_output"] = {
@@ -225,10 +235,14 @@ class V3GraphWiringTests(unittest.TestCase):
                 "rationale": "Search compact field memos.",
             }
         }
+        fake_llm = _ToolSupervisorLlm(AIMessage(
+            content="",
+            tool_calls=[{"name": "tool_search_field_memos", "args": {"query": "fresh", "limit": 4}, "id": "test_tool"}],
+        ))
 
         result = run_phase_0_supervisor(
             state,
-            llm_supervisor=_NoopSupervisorLlm(),
+            llm_supervisor=fake_llm,
             available_tools=[],
             planned_operation_contract_from_state=lambda _state: {},
             execution_trace_after_supervisor=lambda _state, tool, args: {"tool": tool, "args": args or {}},
@@ -242,9 +256,10 @@ class V3GraphWiringTests(unittest.TestCase):
             print_fn=lambda *_args, **_kwargs: None,
         )
 
+        self.assertTrue(fake_llm.invoked)
         self.assertEqual(result["execution_status"], "tool_call_ready")
         self.assertEqual(result["messages"][0].tool_calls[0]["name"], "tool_search_field_memos")
-        self.assertEqual(result["messages"][0].tool_calls[0]["args"]["query"], "sunny")
+        self.assertEqual(result["messages"][0].tool_calls[0]["args"]["query"], "fresh")
 
 
 if __name__ == "__main__":

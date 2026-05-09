@@ -1,8 +1,9 @@
 """Phase -1a strategist for the ANIMA field loop.
 
 The strategist converts the current evidence state into an action plan. It may
-propose tool use, WarRoom deliberation, or delivery readiness, but it should not
-execute tools or make the final readiness decision.
+describe an operation contract, WarRoom deliberation, or delivery readiness, but
+it should not author tool calls, execute tools, or make the final readiness
+decision.
 """
 
 from __future__ import annotations
@@ -13,9 +14,7 @@ from typing import Any, Callable
 from langchain_core.messages import AIMessage, SystemMessage
 
 from .packets import (
-    compact_analysis_for_prompt,
-    compact_reasoning_board_for_prompt,
-    compact_raw_read_report_for_prompt,
+    _compact_fact_cells_for_prompt,
     compact_s_thinking_packet_for_prompt,
     compact_working_memory_for_prompt,
 )
@@ -50,37 +49,94 @@ def _clip_string_list(values: Any, limit: int = 8, text_limit: int = 240) -> lis
     ]
 
 
-def _project_analysis_report(analysis_data: Any) -> dict[str, Any]:
-    if not isinstance(analysis_data, dict):
-        return {}
-    return compact_analysis_for_prompt(analysis_data, role="strategist")
-
-
 def _project_working_memory(working_memory: Any) -> dict[str, Any]:
     if not isinstance(working_memory, dict):
         return {}
     return compact_working_memory_for_prompt(working_memory, role="strategist")
 
 
-def _project_reasoning_board(board: Any) -> dict[str, Any]:
+def _project_fact_cells_for_strategist(board: Any) -> list[dict[str, Any]]:
     if not isinstance(board, dict):
-        return {}
-    return compact_reasoning_board_for_prompt(board, role="strategist")
+        return []
+    return _compact_fact_cells_for_prompt(board.get("fact_cells", []), limit=10)
 
 
-def _project_raw_read_report(raw_read_report: Any) -> dict[str, Any]:
-    if not isinstance(raw_read_report, dict):
-        return {}
-    return compact_raw_read_report_for_prompt(
-        raw_read_report,
-        item_limit=8,
-        excerpt_limit=360,
-        observed_fact_limit=320,
-        known_facts_limit=360,
-        item_summary_limit=260,
-        source_summary_limit=500,
-        coverage_notes_limit=500,
-    )
+def _strings_from_list(values: Any, *, limit: int = 8) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    items: list[str] = []
+    for value in values:
+        text = _clip_text(value, 240)
+        if text:
+            items.append(text)
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _facts_from_fact_cells(fact_cells: Any, *, limit: int = 8) -> list[str]:
+    if not isinstance(fact_cells, list):
+        return []
+    facts: list[str] = []
+    for cell in fact_cells:
+        if not isinstance(cell, dict):
+            continue
+        fact = _clip_text(cell.get("extracted_fact"), 240)
+        if fact:
+            facts.append(fact)
+        if len(facts) >= limit:
+            break
+    return facts
+
+
+def _case_packet_from_handoff(
+    s_thinking_packet: Any,
+    fact_cells_for_strategist: Any,
+) -> dict[str, Any]:
+    """Build a tiny legacy-compatible case packet from -1s handoff material.
+
+    This is not the 2b judge report. It lets older planning helpers keep
+    their narrow operating contract while -1a no longer reads source dumps or
+    the full board.
+    """
+    packet = s_thinking_packet if isinstance(s_thinking_packet, dict) else {}
+    fact_cells = fact_cells_for_strategist if isinstance(fact_cells_for_strategist, list) else []
+    known = _strings_from_list(packet.get("what_we_know", []), limit=8)
+    fact_cell_facts = _facts_from_fact_cells(fact_cells, limit=8)
+    facts = []
+    seen = set()
+    for fact in fact_cell_facts + known:
+        key = fact.lower()
+        if key and key not in seen:
+            facts.append(fact)
+            seen.add(key)
+    missing = _strings_from_list(packet.get("what_is_missing", []), limit=8)
+    status = "COMPLETED" if facts else ("INCOMPLETE" if missing else "")
+    evidences = []
+    for idx, fact in enumerate(facts[:8]):
+        cell = fact_cells[idx] if idx < len(fact_cells) and isinstance(fact_cells[idx], dict) else {}
+        evidences.append({
+            "source_id": str(cell.get("source_id") or cell.get("fact_id") or f"handoff_fact_{idx + 1}").strip(),
+            "source_type": str(cell.get("source_type") or "thinking_handoff").strip(),
+            "extracted_fact": fact,
+            "fact_id": str(cell.get("fact_id") or "").strip(),
+        })
+    return {
+        "investigation_status": status,
+        "situational_brief": _clip_text(packet.get("goal_state") or packet.get("next_node_reason"), 420),
+        "analytical_thought": _clip_text(packet.get("next_node_reason") or packet.get("evidence_state"), 420),
+        "evidences": evidences,
+        "usable_field_memo_facts": facts[:8],
+        "accepted_facts": facts[:8],
+        "missing_slots": missing[:8],
+        "can_answer_user_goal": bool(facts),
+        "contract_status": "satisfied" if facts else "missing_evidence",
+    }
+
+
+def _handoff_has_known_material(s_thinking_packet: Any) -> bool:
+    packet = s_thinking_packet if isinstance(s_thinking_packet, dict) else {}
+    return bool(_strings_from_list(packet.get("what_we_know", []), limit=1))
 
 
 def _project_strategist_goal(source: dict[str, Any]) -> dict[str, Any]:
@@ -115,16 +171,13 @@ def project_state_for_strategist(state: dict[str, Any]) -> dict[str, Any]:
         "user_state": _clip_text(source.get("user_state"), 700),
         "user_char": _clip_text(source.get("user_char"), 700),
         "songryeon_thoughts": _clip_text(source.get("songryeon_thoughts"), 900),
-        "tactical_briefing": _clip_text(source.get("tactical_briefing"), 900),
         "biolink_status": _clip_text(source.get("biolink_status"), 500),
         "time_gap": source.get("time_gap", 0),
         "global_tolerance": source.get("global_tolerance", 1.0),
         "self_correction_memo": _clip_text(source.get("self_correction_memo"), 700),
         "strategist_goal": _project_strategist_goal(source),
         "working_memory": _project_working_memory(source.get("working_memory", {})),
-        "raw_read_report": _project_raw_read_report(source.get("raw_read_report", {})),
-        "analysis_report": _project_analysis_report(source.get("analysis_report", {})),
-        "reasoning_board": _project_reasoning_board(source.get("reasoning_board", {})),
+        "fact_cells_for_strategist": _project_fact_cells_for_strategist(source.get("reasoning_board", {})),
         "war_room": _json_clone(source.get("war_room", {})) if isinstance(source.get("war_room", {}), dict) else {},
         "start_gate_review": _json_clone(source.get("start_gate_review", {})) if isinstance(source.get("start_gate_review", {}), dict) else {},
         "start_gate_switches": _json_clone(source.get("start_gate_switches", {})) if isinstance(source.get("start_gate_switches", {}), dict) else {},
@@ -142,21 +195,16 @@ def run_base_phase_minus_1a_thinker(
     llm: Any,
     strategist_reasoning_output_schema: Any,
     build_phase_minus_1a_prompt: Callable[..., str],
-    build_reasoning_board_from_analysis: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]],
     normalize_war_room_state: Callable[[dict[str, Any]], dict[str, Any]],
-    analysis_packet_for_prompt: Callable[..., dict[str, Any]],
     working_memory_packet_for_prompt: Callable[[dict[str, Any]], dict[str, Any]],
-    reasoning_board_packet_for_prompt: Callable[..., dict[str, Any]],
-    raw_read_report_packet_for_prompt: Callable[[dict[str, Any]], dict[str, Any]],
     war_room_packet_for_prompt: Callable[[dict[str, Any]], dict[str, Any]],
     answer_mode_policy_from_state: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]],
     answer_mode_policy_packet_for_prompt: Callable[[dict[str, Any]], str],
     evidence_ledger_for_prompt: Callable[[dict[str, Any]], str],
     fallback_strategist_output: Callable[..., tuple[dict[str, Any], dict[str, Any]]],
-    force_findings_first_delivery_strategy: Callable[[dict[str, Any], dict[str, Any], str], dict[str, Any]],
+    force_findings_first_delivery_strategy: Callable[[dict[str, Any], dict[str, Any], list[dict[str, Any]], str], dict[str, Any]],
     war_room_after_advocate: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]], dict[str, Any]],
     sanitize_strategist_goal_fields: Callable[[dict[str, Any], str, dict[str, Any]], dict[str, Any]],
-    ensure_tool_request_in_strategist_payload: Callable[[dict[str, Any]], dict[str, Any]],
     apply_strategist_output_to_reasoning_board: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]],
     print_fn: Callable[[str], None] = print,
 ) -> dict[str, Any]:
@@ -165,16 +213,20 @@ def run_base_phase_minus_1a_thinker(
 
     projected_state = project_state_for_strategist(state)
     user_input = projected_state["user_input"]
-    analysis_data = projected_state.get("analysis_report", {})
-    status = str(analysis_data.get("investigation_status") or "").upper()
-    evidences = analysis_data.get("evidences", []) if isinstance(analysis_data, dict) else []
-    reasoning_board = projected_state.get("reasoning_board", {})
-    if not isinstance(reasoning_board, dict) or not reasoning_board:
-        reasoning_board = build_reasoning_board_from_analysis(projected_state, analysis_data)
+    s_packet_dict = projected_state.get("s_thinking_packet", {})
+    if not isinstance(s_packet_dict, dict):
+        s_packet_dict = {}
+    fact_cells_for_strategist = projected_state.get("fact_cells_for_strategist", [])
+    if not isinstance(fact_cells_for_strategist, list):
+        fact_cells_for_strategist = []
+    handoff_case = _case_packet_from_handoff(s_packet_dict, fact_cells_for_strategist)
+    reasoning_board = state.get("reasoning_board", {})
+    if not isinstance(reasoning_board, dict):
+        reasoning_board = {}
+    thin_case = not fact_cells_for_strategist and not _handoff_has_known_material(s_packet_dict)
 
     recent_context = projected_state.get("recent_context", "")
     songryeon_thoughts = projected_state.get("songryeon_thoughts", "")
-    tactical_briefing = projected_state.get("tactical_briefing", "")
     user_state = projected_state.get("user_state", "")
     user_char = projected_state.get("user_char", "")
     bio_status = projected_state.get("biolink_status", "")
@@ -182,28 +234,26 @@ def run_base_phase_minus_1a_thinker(
     tolerance = projected_state.get("global_tolerance", 1.0)
     auditor_memo = projected_state.get("self_correction_memo", "")
     working_memory = projected_state.get("working_memory", {})
-    raw_read_report = projected_state.get("raw_read_report", {})
     war_room = normalize_war_room_state(projected_state.get("war_room", {}))
-    analysis_packet = analysis_packet_for_prompt(analysis_data, include_thought=True, role="strategist")
     working_memory_packet = working_memory_packet_for_prompt(working_memory, role="strategist")
-    reasoning_board_packet = reasoning_board_packet_for_prompt(reasoning_board, approved_only=False, role="strategist")
-    raw_read_packet = raw_read_report_packet_for_prompt(raw_read_report)
     war_room_packet = war_room_packet_for_prompt(war_room)
     start_gate_review_packet = json.dumps(projected_state.get("start_gate_review", {}), ensure_ascii=False, indent=2)
-    s_thinking_packet = json.dumps(projected_state.get("s_thinking_packet", {}), ensure_ascii=False, indent=2)
+    s_thinking_packet = json.dumps(s_packet_dict, ensure_ascii=False, indent=2)
+    fact_cells_packet = json.dumps(fact_cells_for_strategist, ensure_ascii=False, indent=2)
     strategist_goal_packet = json.dumps(projected_state.get("strategist_goal", {}), ensure_ascii=False, indent=2)
     tool_carryover_packet = json.dumps(projected_state.get("tool_carryover", {}), ensure_ascii=False, indent=2)
-    answer_mode_policy = answer_mode_policy_from_state(projected_state, analysis_data)
+    answer_mode_policy = answer_mode_policy_from_state(projected_state, {})
     answer_mode_policy_packet = answer_mode_policy_packet_for_prompt(answer_mode_policy)
     evidence_ledger_packet = evidence_ledger_for_prompt(projected_state.get("evidence_ledger", {}))
 
-    if not evidences and status in {"", "INCOMPLETE"}:
+    if thin_case:
         print_fn("  [Phase -1a] Evidence is thin; using fallback planner.")
         strategist_output, reasoning_board = fallback_strategist_output(
             user_input,
-            analysis_data,
+            s_packet_dict,
             working_memory,
             reasoning_board,
+            fact_cells_for_strategist=fact_cells_for_strategist,
             recent_context=recent_context,
             start_gate_switches=projected_state.get("start_gate_switches", {}),
             tool_carryover=projected_state.get("tool_carryover", {}),
@@ -211,9 +261,14 @@ def run_base_phase_minus_1a_thinker(
         response_strategy = strategist_output.get("response_strategy", {})
         if not isinstance(response_strategy, dict):
             response_strategy = {}
-        response_strategy = force_findings_first_delivery_strategy(response_strategy, analysis_data, user_input)
+        response_strategy = force_findings_first_delivery_strategy(
+            response_strategy,
+            s_packet_dict,
+            fact_cells_for_strategist,
+            user_input,
+        )
         strategist_output["response_strategy"] = response_strategy
-        war_room = war_room_after_advocate(war_room, analysis_data, strategist_output, reasoning_board)
+        war_room = war_room_after_advocate(war_room, handoff_case, strategist_output, reasoning_board)
         print_fn(f"  [Phase -1a] current_step_goal={strategist_output.get('action_plan', {}).get('current_step_goal', '')[:120]}")
         print_fn(f"  [Phase -1a] candidate_pairs={len(reasoning_board.get('candidate_pairs', []))}")
         return {
@@ -234,16 +289,13 @@ def run_base_phase_minus_1a_thinker(
         tolerance=tolerance,
         bio_status=bio_status,
         songryeon_thoughts=songryeon_thoughts,
-        tactical_briefing=tactical_briefing,
         working_memory_packet=working_memory_packet,
         tool_carryover_packet=tool_carryover_packet,
         s_thinking_packet=s_thinking_packet,
+        fact_cells_packet=fact_cells_packet,
         strategist_goal_packet=strategist_goal_packet,
         start_gate_review_packet=start_gate_review_packet,
-        reasoning_board_packet=reasoning_board_packet,
         auditor_memo=auditor_memo,
-        analysis_packet=analysis_packet,
-        raw_read_packet=raw_read_packet,
         war_room_packet=war_room_packet,
         evidence_ledger_packet=evidence_ledger_packet,
     )
@@ -260,14 +312,18 @@ def run_base_phase_minus_1a_thinker(
         response_strategy = strategist_payload.get("response_strategy", {})
         if not isinstance(response_strategy, dict):
             response_strategy = {}
-        response_strategy = force_findings_first_delivery_strategy(response_strategy, analysis_data, user_input)
+        response_strategy = force_findings_first_delivery_strategy(
+            response_strategy,
+            s_packet_dict,
+            fact_cells_for_strategist,
+            user_input,
+        )
         strategist_payload["response_strategy"] = response_strategy
         strategist_payload = sanitize_strategist_goal_fields(
             strategist_payload,
             user_input,
             projected_state.get("start_gate_switches", {}),
         )
-        strategist_payload = ensure_tool_request_in_strategist_payload(strategist_payload)
         reasoning_board = apply_strategist_output_to_reasoning_board(reasoning_board, strategist_payload)
         print_fn(f"  [Phase -1a] current_step_goal={strategist_payload.get('action_plan', {}).get('current_step_goal', '')[:120]}")
         print_fn(f"  [Phase -1a] candidate_pairs={len(reasoning_board.get('candidate_pairs', []))}")
@@ -275,9 +331,10 @@ def run_base_phase_minus_1a_thinker(
         print_fn(f"[Phase -1a] structured output error: {exc}")
         strategist_payload, reasoning_board = fallback_strategist_output(
             user_input,
-            analysis_data,
+            s_packet_dict,
             working_memory,
             reasoning_board,
+            fact_cells_for_strategist=fact_cells_for_strategist,
             recent_context=recent_context,
             start_gate_switches=projected_state.get("start_gate_switches", {}),
             tool_carryover=projected_state.get("tool_carryover", {}),
@@ -286,16 +343,20 @@ def run_base_phase_minus_1a_thinker(
         response_strategy = strategist_payload.get("response_strategy", {})
         if not isinstance(response_strategy, dict):
             response_strategy = {}
-        response_strategy = force_findings_first_delivery_strategy(response_strategy, analysis_data, user_input)
+        response_strategy = force_findings_first_delivery_strategy(
+            response_strategy,
+            s_packet_dict,
+            fact_cells_for_strategist,
+            user_input,
+        )
         strategist_payload["response_strategy"] = response_strategy
         strategist_payload = sanitize_strategist_goal_fields(
             strategist_payload,
             user_input,
             projected_state.get("start_gate_switches", {}),
         )
-        strategist_payload = ensure_tool_request_in_strategist_payload(strategist_payload)
 
-    war_room = war_room_after_advocate(war_room, analysis_data, strategist_payload, reasoning_board)
+    war_room = war_room_after_advocate(war_room, handoff_case, strategist_payload, reasoning_board)
     return {
         "strategist_output": strategist_payload,
         "response_strategy": response_strategy,
@@ -309,7 +370,6 @@ def run_phase_minus_1a_thinker(
     state: dict[str, Any],
     *,
     previous_phase_minus_1a_thinker: Callable[[dict[str, Any]], dict[str, Any]],
-    ensure_tool_request_in_strategist_payload: Callable[[dict[str, Any]], dict[str, Any]],
     build_strategist_objection_packet: Callable[[dict[str, Any], dict[str, Any], str], dict[str, Any]],
     normalize_operation_plan: Callable[[dict[str, Any]], dict[str, Any]],
     attach_ledger_event: Callable[..., dict[str, Any]],
@@ -319,9 +379,9 @@ def run_phase_minus_1a_thinker(
     strategist_output = result.get("strategist_output", {})
     if not isinstance(strategist_output, dict):
         strategist_output = {}
-    analysis_data = state.get("analysis_report", {})
-    if not isinstance(analysis_data, dict):
-        analysis_data = {}
+    judge_report_for_objection = state.get("analysis_report", {})
+    if not isinstance(judge_report_for_objection, dict):
+        judge_report_for_objection = {}
 
     response_strategy = strategist_output.get("response_strategy", {})
     if not isinstance(response_strategy, dict):
@@ -331,10 +391,9 @@ def run_phase_minus_1a_thinker(
     if not isinstance(reasoning_board, dict):
         reasoning_board = {}
 
-    strategist_output = ensure_tool_request_in_strategist_payload(strategist_output)
     strategist_objection_packet = build_strategist_objection_packet(
         strategist_output,
-        analysis_data,
+        judge_report_for_objection,
         state.get("user_input", ""),
     )
 

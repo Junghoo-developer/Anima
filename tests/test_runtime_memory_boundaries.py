@@ -95,7 +95,7 @@ class RuntimeMemoryBoundaryTests(unittest.TestCase):
         )
         self.assertEqual(history["schema"], "SThinkingHistory.v1")
         self.assertEqual(len(history["history_compact"]), 1)
-        self.assertEqual(history["current"]["routing_decision"]["next_node"], "phase_3")
+        self.assertEqual(history["current"]["next_node"], "phase_3")
 
         normalized = normalize_s_thinking_history({
             "history_compact": [row] * 10,

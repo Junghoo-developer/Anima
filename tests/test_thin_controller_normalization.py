@@ -45,11 +45,11 @@ class ThinControllerNormalizationTests(unittest.TestCase):
         self.assertNotEqual(switches["normalized_goal"], text)
         self.assertEqual(switches["start_gate_turn_contract"]["user_intent"], "providing_current_memory")
         packet = result["s_thinking_packet"]
-        self.assertEqual(packet["schema"], "SThinkingPacket.v1")
-        self.assertEqual(packet["routing_decision"]["next_node"], "phase_3")
-        self.assertEqual(packet["situation_thinking"]["domain"], "continuation")
+        self.assertEqual(packet["schema"], "ThinkingHandoff.v1")
+        self.assertEqual(packet["next_node"], "phase_3")
+        self.assertEqual(packet["recipient"], "phase_3")
         self.assertNotIn(text, str(packet))
-        self.assertIn("do not write tool names or queries in -1s", packet["next_direction"]["avoid"])
+        self.assertIn("do not write tool names or queries in -1s", packet["constraints_for_next_node"])
 
     def test_start_gate_llm_contract_blocks_story_share_recall_search(self):
         text = (
@@ -159,11 +159,11 @@ class ThinControllerNormalizationTests(unittest.TestCase):
             nodes._llm_start_gate_turn_contract = original
 
         packet = result["s_thinking_packet"]
-        self.assertEqual(packet["routing_decision"]["next_node"], "-1a")
-        self.assertEqual(packet["situation_thinking"]["domain"], "memory_recall")
-        self.assertIn("direct evidence required", " ".join(packet["situation_thinking"]["key_facts_needed"]))
+        self.assertEqual(packet["next_node"], "-1a")
+        self.assertEqual(packet["recipient"], "-1a")
+        self.assertIn("evidence has not been read", " ".join(packet["what_is_missing"]))
         self.assertNotIn("tool_search", str(packet))
-        self.assertNotIn("Sunny", str(packet["next_direction"]))
+        self.assertNotIn("Sunny", str(packet["constraints_for_next_node"]))
 
     def test_start_gate_accumulates_previous_s_thinking_history(self):
         state = empty_anima_state()
@@ -216,8 +216,8 @@ class ThinControllerNormalizationTests(unittest.TestCase):
         self.assertEqual(captured["history"]["history_compact"][0]["domain"], "memory_recall")
         self.assertEqual(captured["history"]["history_compact"][0]["main_gap"], "diary evidence was not found")
         self.assertEqual(result["s_thinking_history"]["history_compact"][0]["next_node"], "-1a")
-        self.assertEqual(result["s_thinking_history"]["current"]["schema"], "SThinkingPacket.v1")
-        self.assertEqual(result["s_thinking_history"]["current"]["routing_decision"]["next_node"], "-1a")
+        self.assertEqual(result["s_thinking_history"]["current"]["schema"], "ThinkingHandoff.v1")
+        self.assertEqual(result["s_thinking_history"]["current"]["next_node"], "-1a")
 
     def test_operation_plan_does_not_route_from_raw_investigate_wording(self):
         plan = nodes._derive_operation_plan(

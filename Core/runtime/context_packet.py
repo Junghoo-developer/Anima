@@ -3,11 +3,11 @@
 These packets contain observable runtime facts. They are prompt material, not
 identity material and not routing authority.
 
-V3 role note:
+V3/V4 role note:
 - This module owns -1s cumulative context-packet assembly.
 - The public runtime packet remains `RuntimeContext.v1`.
-- The V3 -1s four-slot `s_thinking_packet` is emitted by
-  `Core.pipeline.start_gate`; this module only compresses prior -1s outputs.
+- The live -1s handoff is `ThinkingHandoff.v1`; the old four-slot
+  `SThinkingPacket.v1` remains supported as a one-season compatibility input.
 """
 
 from __future__ import annotations
@@ -51,6 +51,23 @@ def _first_string(values: Any) -> str:
     return _clip_text(values, 180)
 
 
+def _clip_list(values: Any, *, limit: int = 8, text_limit: int = 180) -> list[str]:
+    if isinstance(values, list):
+        source = values
+    elif values:
+        source = [values]
+    else:
+        source = []
+    clipped: list[str] = []
+    for value in source:
+        text = _clip_text(value, text_limit)
+        if text:
+            clipped.append(text)
+        if len(clipped) >= limit:
+            break
+    return clipped
+
+
 def compact_s_thinking_cycle(packet: dict[str, Any] | None, *, cycle: int | None = None) -> dict[str, Any]:
     """Compress one completed -1s packet into the history row.
 
@@ -60,6 +77,25 @@ def compact_s_thinking_cycle(packet: dict[str, Any] | None, *, cycle: int | None
     source = packet if isinstance(packet, dict) else {}
     if not source:
         return {}
+    if any(key in source for key in ("goal_state", "next_node", "what_is_missing", "next_node_reason")):
+        try:
+            cycle_num = int(cycle or 0)
+        except (TypeError, ValueError):
+            cycle_num = 0
+        target = _clip_text(source.get("next_node") or source.get("recipient"), 40)
+        if target == "119":
+            target = "phase_119"
+        row = {
+            "cycle": max(cycle_num, 1),
+            "domain": _clip_text(source.get("goal_state") or source.get("evidence_state"), 80),
+            "next_node": target,
+            "main_gap": _first_string(source.get("what_is_missing", [])),
+            "brief_thought": _clip_text(source.get("next_node_reason") or source.get("goal_state"), 120),
+        }
+        if not any(str(row.get(key) or "").strip() for key in ("domain", "next_node", "main_gap", "brief_thought")):
+            return {}
+        return row
+
     situation = source.get("situation_thinking", {})
     if not isinstance(situation, dict):
         situation = {}
@@ -126,6 +162,58 @@ def normalize_s_thinking_history(packet: dict[str, Any] | None, *, history_limit
     }
 
 
+def _normalize_current_s_thinking_packet(current: dict[str, Any] | None) -> dict[str, Any]:
+    source = current if isinstance(current, dict) else {}
+    if not source:
+        return {}
+    if any(key in source for key in ("producer", "recipient", "goal_state", "next_node", "what_we_know")):
+        target = _clip_text(source.get("next_node") or source.get("recipient"), 40)
+        if target == "119":
+            target = "phase_119"
+        recipient = _clip_text(source.get("recipient") or target, 40)
+        if recipient == "119":
+            recipient = "phase_119"
+        return {
+            "schema": "ThinkingHandoff.v1",
+            "producer": _clip_text(source.get("producer"), 40) or "-1s",
+            "recipient": recipient or target or "-1a",
+            "goal_state": _clip_text(source.get("goal_state"), 220),
+            "evidence_state": _clip_text(source.get("evidence_state"), 260),
+            "what_we_know": _clip_list(source.get("what_we_know", []), limit=8, text_limit=220),
+            "what_is_missing": _clip_list(source.get("what_is_missing", []), limit=8, text_limit=180),
+            "next_node": target or recipient or "-1a",
+            "next_node_reason": _clip_text(source.get("next_node_reason"), 220),
+            "constraints_for_next_node": _clip_list(source.get("constraints_for_next_node", []), limit=6, text_limit=180),
+        }
+    situation = source.get("situation_thinking", {})
+    situation = situation if isinstance(situation, dict) else {}
+    loop_summary = source.get("loop_summary", {})
+    loop_summary = loop_summary if isinstance(loop_summary, dict) else {}
+    next_direction = source.get("next_direction", {})
+    next_direction = next_direction if isinstance(next_direction, dict) else {}
+    routing = source.get("routing_decision", {})
+    routing = routing if isinstance(routing, dict) else {}
+    next_node = _clip_text(routing.get("next_node"), 40)
+    if next_node == "119":
+        next_node = "phase_119"
+    goal_parts = [
+        _clip_text(situation.get("domain"), 80),
+        _clip_text(situation.get("user_intent"), 100),
+    ]
+    return {
+        "schema": "ThinkingHandoff.v1",
+        "producer": "-1s",
+        "recipient": next_node or "-1a",
+        "goal_state": " | ".join(part for part in goal_parts if part),
+        "evidence_state": _clip_text(loop_summary.get("current_evidence_state"), 260),
+        "what_we_know": [],
+        "what_is_missing": _clip_list(loop_summary.get("gaps", []), limit=8, text_limit=180),
+        "next_node": next_node or "-1a",
+        "next_node_reason": _clip_text(routing.get("reason"), 220),
+        "constraints_for_next_node": _clip_list(next_direction.get("avoid", []), limit=6, text_limit=180),
+    }
+
+
 def append_cycle_to_history(
     history: dict[str, Any] | None,
     previous_packet: dict[str, Any] | None,
@@ -163,7 +251,7 @@ def build_cumulative_s_thinking_packet(
     return {
         "schema": "SThinkingHistory.v1",
         "history_compact": rows[-history_limit:] if history_limit > 0 else rows,
-        "current": current if isinstance(current, dict) else {},
+        "current": _normalize_current_s_thinking_packet(current),
     }
 
 

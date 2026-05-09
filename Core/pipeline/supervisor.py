@@ -12,6 +12,50 @@ from typing import Any, Callable
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from .packets import _compact_fact_cells_for_prompt
+
+
+def _clip_text(value: Any, limit: int = 320) -> str:
+    text = str(value or "").strip()
+    if limit <= 0 or len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def _clip_string_list(values: Any, *, limit: int = 8, text_limit: int = 180) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    items: list[str] = []
+    for value in values:
+        text = _clip_text(value, text_limit)
+        if text:
+            items.append(text)
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _fact_cells_for_supervisor_prompt(state: dict[str, Any]) -> list[dict[str, Any]]:
+    board = state.get("reasoning_board", {})
+    if not isinstance(board, dict):
+        board = {}
+    return _compact_fact_cells_for_prompt(board.get("fact_cells", []), limit=10)
+
+
+def _s_thinking_missing_for_supervisor_prompt(state: dict[str, Any]) -> list[str]:
+    packet = state.get("s_thinking_packet", {})
+    if not isinstance(packet, dict):
+        return []
+    missing = packet.get("what_is_missing", [])
+    if not isinstance(missing, list) or not missing:
+        loop_summary = packet.get("loop_summary", {})
+        if not isinstance(loop_summary, dict):
+            loop_summary = {}
+        legacy_missing = loop_summary.get("gaps", [])
+        if isinstance(legacy_missing, list) and legacy_missing:
+            missing = legacy_missing
+    return _clip_string_list(missing, limit=8, text_limit=180)
+
 
 def run_phase_0_supervisor(
     state: dict[str, Any],
@@ -40,28 +84,6 @@ def run_phase_0_supervisor(
         "execution_trace": execution_trace_after_supervisor(state, "", None),
         "ops_decision": {},
     }
-
-    strategist_output = state.get("strategist_output", {})
-    if isinstance(strategist_output, dict):
-        tool_request = strategist_output.get("tool_request", {})
-        if isinstance(tool_request, dict):
-            tool_name = str(tool_request.get("tool_name") or "").strip()
-            tool_args = tool_request.get("tool_args", {}) if isinstance(tool_request.get("tool_args"), dict) else {}
-            if bool(tool_request.get("should_call_tool")) and tool_name:
-                print_fn(f"  [Phase 0] executing strategist tool_request: {tool_name}")
-                tool_message = build_supervisor_tool_message(
-                    tool_name,
-                    tool_args,
-                    user_input,
-                    planned_operation_contract,
-                )
-                return {
-                    **base_result,
-                    "supervisor_instructions": str(tool_request.get("rationale") or "").strip(),
-                    "execution_status": "tool_call_ready",
-                    "execution_trace": execution_trace_after_supervisor(state, tool_name, tool_args),
-                    "messages": [tool_message],
-                }
 
     if isinstance(auditor_decision, dict):
         action = str(auditor_decision.get("action") or "").strip()
@@ -114,24 +136,20 @@ def run_phase_0_supervisor(
             "messages": [direct_message],
         }
 
-    if not auditor_instruction:
-        print_fn("  [Phase 0] no executable auditor instruction; remanding to -1b")
-        return {
-            **base_result,
-            "execution_status": "blocked",
-            "execution_block_reason": "Supervisor received an empty auditor instruction.",
-        }
+    fact_cells = _fact_cells_for_supervisor_prompt(state)
+    what_is_missing = _s_thinking_missing_for_supervisor_prompt(state)
 
     sys_prompt = (
-        "You are ANIMA's active search captain.\n"
-        "You are also the 0-supervisor ops hub.\n"
-        "Execute the auditor/strategist instruction as an exact safe tool call.\n"
-        "Do not rewrite vague search phrases here. If the instruction is not a concrete tool call, return no tool so -1a/-1b can repair it.\n"
+        "You are ANIMA's 0_supervisor: the ops layer that converts the strategist's operation_contract into one exact safe tool call.\n"
+        "Authority: choose a safe tool name, arguments, and search query from the operation contract and available tool cards.\n"
         "If the user explicitly gave two alternative search targets and the instruction names both targets, you may emit up to two tool_search_memory calls.\n"
-        "Do not reply with normal text.\n\n"
+        "If no tool would help, return no tool_calls so the graph can remand for review.\n"
+        "Forbidden: do not write final-answer text, change answer_mode, re-judge facts, or invent fact_ids.\n\n"
         f"[user_input]\n{user_input}\n\n"
-        f"[auditor_instruction]\n{auditor_instruction}\n"
         f"[operation_contract]\n{json.dumps(planned_operation_contract, ensure_ascii=False)}\n"
+        f"[fact_cells]\n{json.dumps(fact_cells, ensure_ascii=False, indent=2)}\n"
+        f"[s_thinking_packet_what_is_missing]\n{json.dumps(what_is_missing, ensure_ascii=False, indent=2)}\n"
+        f"[auditor_instruction]\n{auditor_instruction}\n"
         f"[ops_tool_cards]\n{json.dumps(ops_tool_cards(), ensure_ascii=False, indent=2)}\n\n"
         f"[ops_node_cards]\n{json.dumps(ops_node_cards(), ensure_ascii=False, indent=2)}\n"
     )
@@ -143,9 +161,10 @@ def run_phase_0_supervisor(
 
     for attempt in range(3):
         response = llm_with_tools.invoke(messages)
-        if response.tool_calls:
-            if len(response.tool_calls) == 1:
-                tool_call = response.tool_calls[0]
+        tool_calls = getattr(response, "tool_calls", []) or []
+        if tool_calls:
+            if len(tool_calls) == 1:
+                tool_call = tool_calls[0]
                 response = build_supervisor_tool_message(
                     str(tool_call.get("name") or ""),
                     tool_call.get("args", {}) if isinstance(tool_call.get("args"), dict) else {},
@@ -165,7 +184,8 @@ def run_phase_0_supervisor(
             }
 
         print_fn(f"  [Phase 0] tool-call parsing failed; retrying ({attempt + 1}/3)")
-        messages.append(response)
+        if hasattr(response, "content"):
+            messages.append(response)
         messages.append(HumanMessage(content="Return one safe tool call, or up to two tool_search_memory calls if the user gave explicit alternatives."))
 
     print_fn("[Phase 0] supervisor could not create a safe executable plan; remanding to -1b")

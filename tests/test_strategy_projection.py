@@ -59,13 +59,14 @@ class StrategyProjectionTests(unittest.TestCase):
         self.assertNotIn("normalized_goal", projected)
         self.assertEqual(projected["strategist_goal"]["answer_mode_target"], "memory_recall")
         self.assertNotIn("last_turn", projected["working_memory"])
-        self.assertEqual(projected["s_thinking_packet"]["schema"], "SThinkingPacket.v1")
+        self.assertEqual(projected["s_thinking_packet"]["schema"], "ThinkingHandoff.v1")
         self.assertEqual(projected["working_memory"]["memory_writer"]["active_topic"], "memory audit")
         self.assertNotIn("short_term_context", projected["working_memory"]["memory_writer"])
 
-    def test_projection_bounds_raw_read_and_analysis_payloads(self):
+    def test_projection_excludes_judge_surfaces_and_exposes_fact_cells(self):
         long_text = "x" * 2000
         state = {
+            "tactical_briefing": "advisory should move to -1s only",
             "raw_read_report": {
                 "read_mode": "full_raw_review",
                 "items": [
@@ -90,15 +91,31 @@ class StrategyProjectionTests(unittest.TestCase):
                     for idx in range(20)
                 ],
             },
+            "reasoning_board": {
+                "fact_cells": [
+                    {
+                        "fact_id": f"fact-{idx}",
+                        "claim": f"legacy claim {idx}",
+                        "source_id": f"source-{idx}",
+                        "source_type": "memory_node",
+                        "excerpt": long_text,
+                    }
+                    for idx in range(12)
+                ],
+                "verdict_board": {"judge_notes": ["should not project the whole board"]},
+            },
         }
 
         projected = project_state_for_strategist(state)
 
-        self.assertEqual(len(projected["raw_read_report"]["items"]), 8)
-        self.assertLessEqual(len(projected["raw_read_report"]["items"][0]["excerpt"]), 360)
-        self.assertEqual(len(projected["analysis_report"]["evidences"]), 8)
-        self.assertNotIn("source_judgments", projected["analysis_report"])
-        self.assertLessEqual(len(projected["analysis_report"]["analytical_thought"]), 420)
+        self.assertNotIn("raw_read_report", projected)
+        self.assertNotIn("analysis_report", projected)
+        self.assertNotIn("reasoning_board", projected)
+        self.assertNotIn("tactical_briefing", projected)
+        self.assertEqual(len(projected["fact_cells_for_strategist"]), 10)
+        self.assertEqual(projected["fact_cells_for_strategist"][0]["fact_id"], "fact-0")
+        self.assertEqual(projected["fact_cells_for_strategist"][0]["extracted_fact"], "legacy claim 0")
+        self.assertIn("excerpt", projected["fact_cells_for_strategist"][0])
 
     def test_working_memory_prompt_packet_excludes_bulk_last_turn(self):
         packet_text = working_memory_packet_for_prompt({
@@ -313,9 +330,9 @@ class StrategyProjectionTests(unittest.TestCase):
             },
             role="strategist",
         )
-        self.assertEqual(len(s_packet["situation_thinking"]["key_facts_needed"]), 4)
+        self.assertLessEqual(len(s_packet["what_is_missing"]), 8)
         self.assertNotIn("unknown_section", s_packet)
-        self.assertLessEqual(len(s_packet["routing_decision"]["reason"]), 220)
+        self.assertLessEqual(len(s_packet["next_node_reason"]), 220)
 
         rescue = compact_rescue_handoff_for_prompt(
             {

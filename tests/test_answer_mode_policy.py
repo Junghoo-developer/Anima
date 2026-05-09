@@ -240,7 +240,7 @@ class AnswerModePolicyTests(unittest.TestCase):
         finally:
             nodes._llm_start_gate_turn_contract = original
 
-        self.assertEqual(result["s_thinking_packet"]["routing_decision"]["next_node"], "phase_3")
+        self.assertEqual(result["s_thinking_packet"]["next_node"], "phase_3")
         self.assertEqual(result["auditor_decision"]["action"], "phase_3")
 
     def test_phase3_payload_exposes_policy(self):

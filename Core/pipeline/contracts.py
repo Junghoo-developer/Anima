@@ -255,6 +255,28 @@ class SThinkingPacket(BaseModel):
     routing_decision: SThinkingRoutingDecision = Field(default_factory=SThinkingRoutingDecision)
 
 
+class ThinkingHandoff(BaseModel):
+    schema_version: Literal["ThinkingHandoff.v1"] = Field(default="ThinkingHandoff.v1", alias="schema")
+    producer: Literal["-1s"] = Field(default="-1s", description="The node that produced this handoff.")
+    recipient: Literal["-1a", "phase_3", "phase_119"] = Field(
+        default="-1a",
+        description="The next recipient selected by -1s.",
+    )
+    goal_state: str = Field(default="", description="Compact normalized goal state.")
+    evidence_state: str = Field(default="", description="Compact current evidence state.")
+    what_we_know: List[str] = Field(default_factory=list, description="Known facts available to the next node.")
+    what_is_missing: List[str] = Field(default_factory=list, description="Missing facts or slots that still matter.")
+    next_node: Literal["-1a", "phase_3", "phase_119"] = Field(
+        default="-1a",
+        description="Graph node target selected by -1s.",
+    )
+    next_node_reason: str = Field(default="", description="Why -1s selected the next node.")
+    constraints_for_next_node: List[str] = Field(
+        default_factory=list,
+        description="Boundaries the next node must respect.",
+    )
+
+
 class OpsToolCard(BaseModel):
     tool_name: str = Field(description="Registered tool name that 0-supervisor may execute.")
     purpose: str = Field(description="What this tool is for.")
@@ -282,9 +304,15 @@ class OpsDecision(BaseModel):
     retry_anchor_kind: str = Field(default="", description="What kind of previous anchor the retry/follow-up relies on.")
 
 class StrategistToolRequest(BaseModel):
+    """DEPRECATED: -1a no longer authors tool calls (F4).
+
+    Kept for one-season legacy compatibility on read-side packets only. The
+    live tool-call author is phase 0 supervisor.
+    """
+
     should_call_tool: bool = Field(
         default=False,
-        description="Whether -1a believes one exact tool call should be sent to phase 0."
+        description="Deprecated legacy flag from pre-F4 -1a tool requests."
     )
     tool_name: Literal[
         "",
@@ -298,7 +326,7 @@ class StrategistToolRequest(BaseModel):
         default_factory=dict,
         description="Exact tool arguments. Phase 0 must execute these as-is."
     )
-    rationale: str = Field(default="", description="Why this is the right tool/query.")
+    rationale: str = Field(default="", description="Deprecated legacy rationale.")
 
 class FactCell(BaseModel):
     fact_id: str = Field(description="Stable fact identifier inside the reasoning board.")
@@ -561,10 +589,6 @@ class StrategistReasoningOutput(BaseModel):
         description="Short list of the next best directions if the case should not be delivered yet."
     )
     action_plan: StepByStepPlan = Field(description="Concrete plan for what the system should do on this turn.")
-    tool_request: StrategistToolRequest = Field(
-        default_factory=StrategistToolRequest,
-        description="Exact executable tool request for phase 0. Leave empty unless action_plan.required_tool is executable.",
-    )
     response_strategy: ResponseStrategy | None = Field(
         default=None,
         description="Response script only when the current step is final-answer delivery. Leave null when evidence collection or planning comes first."
@@ -586,6 +610,16 @@ class AuditorOutput(BaseModel):
     instruction_to_0: str = Field(description="Exact tool call for phase_0, or empty string.")
 
 
+DELIVERY_REVIEW_REASON_TYPES = (
+    "",
+    "hallucination",
+    "omission",
+    "contradiction",
+    "thought_gap",
+    "tool_misuse",
+)
+
+
 class DeliveryReview(BaseModel):
     schema_version: Literal["DeliveryReview.v1"] = Field(default="DeliveryReview.v1", alias="schema")
     verdict: Literal["approve", "remand", "sos_119"] = Field(
@@ -593,6 +627,15 @@ class DeliveryReview(BaseModel):
         description="Post-phase3 answer review decision.",
     )
     reason: str = Field(default="", description="Short review reason. Not user-facing.")
+    reason_type: Literal["", "hallucination", "omission", "contradiction", "thought_gap", "tool_misuse"] = Field(
+        default="",
+        description="Structured reason class for remand routing. Empty string keeps legacy behavior.",
+    )
+    evidence_refs: List[str] = Field(
+        default_factory=list,
+        description="Fact ids from fact_cells_for_review that the reviewer is referencing.",
+    )
+    delta: str = Field(default="", description="Short human-readable change needed. Not user-facing.")
     issues_found: List[str] = Field(default_factory=list, description="Answer issues found by the reviewer.")
     remand_target: Literal["", "-1a", "-1s"] = Field(
         default="",
@@ -713,6 +756,7 @@ __all__ = [
     'SThinkingNextDirection',
     'SThinkingRoutingDecision',
     'SThinkingPacket',
+    'ThinkingHandoff',
     'OpsToolCard',
     'OpsNodeCard',
     'OpsDecision',
@@ -733,6 +777,7 @@ __all__ = [
     'StepByStepPlan',
     'StrategistReasoningOutput',
     'AuditorOutput',
+    'DELIVERY_REVIEW_REASON_TYPES',
     'DeliveryReview',
     'RescueHandoffPacket',
     'ArbitrationPair',

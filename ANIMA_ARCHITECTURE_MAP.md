@@ -1138,3 +1138,40 @@ Recent thin-controller cleanup:
     `TacticalThought` label. `search_tactics` / `TacticCard` compatibility was
     left untouched as ordered. New regression tests cover active DreamHint
     output, empty active advisory output, and archive/expiry filter presence.
+71. **V4 Phase 0 F트랙 #F2: -1s ThinkingHandoff.v1 + -1b fact_cells 대조 채널 + remand_guidance schema** completed.
+    The live -1s packet is now `ThinkingHandoff.v1` with the approved 9-field
+    handoff surface, while `SThinkingPacket.v1` remains as one-season legacy
+    compatibility input. -1s may receive compact `analysis_report` material and
+    the graph router now prefers top-level `next_node`. `fact_cells` projection
+    was normalized into the V4 `fact_id` / `extracted_fact` / source surface and
+    `delivery_review` now receives `fact_cells_for_review`. `DeliveryReview.v1`
+    gained `reason_type`, `evidence_refs`, and `delta`, with code-owned
+    `reason_type -> remand_target` mapping. New regression tests cover the
+    ThinkingHandoff builder/compat path, -1s analysis input, fact-cell review
+    projection, delivery-review reason routing, and hallucination remand flow.
+72. **V4 Phase 0 F트랙 #F3: -1a 입력 축소 + tactical_briefing 채널 이동 + -1a fact_id 인용 채널** completed.
+    `project_state_for_strategist` no longer projects `analysis_report`,
+    `raw_read_report`, the full `reasoning_board`, or `tactical_briefing`.
+    The strategist now receives `ThinkingHandoff.v1` as the primary case state
+    plus `fact_cells_for_strategist` using the V4 `fact_id` / `extracted_fact`
+    projection. `build_phase_minus_1a_prompt` dropped the old diagnostic/source
+    blocks and added a `[fact_cells]` block with rules that forbid -1a fact
+    re-judgment. `tactical_briefing` is now passed to -1s only as advisory
+    context for the start-gate contract, while the state key and adapter names
+    remain unchanged for one-season compatibility. New tests cover strategist
+    input surface, prompt blocks, -1s tactical briefing input, and ThinkingHandoff
+    strategist integration.
+73. **V4 Phase 0 F트랙 #F4: 0차 LLM 일반 흐름화 + -1a tool_request 권한 이동** completed.
+    `StrategistReasoningOutput` no longer exposes `tool_request`; the
+    `StrategistToolRequest` model and `ensure_tool_request_in_strategist_payload`
+    helper remain only as one-season deprecated read-side compatibility. -1a now
+    writes operation intent and delivery readiness, while phase 0 owns exact tool
+    name, args, and query generation. `run_phase_0_supervisor` no longer shortcuts
+    `strategist_output.tool_request`; it uses the LLM path as the general flow
+    after direct structured/auditor compatibility branches, with prompt inputs for
+    `operation_contract`, compact `fact_cells`, and ThinkingHandoff missing items.
+    `route_after_strategist` now sends non-deliverable plans to `0_supervisor`
+    instead of looping back to -1s, while legacy `tool_request` packets still route
+    to phase 0 with a deprecated log. New tests cover strategist schema/no-op
+    compatibility, supervisor general-flow prompts, and graph routing. Full tests:
+    `294 OK`.

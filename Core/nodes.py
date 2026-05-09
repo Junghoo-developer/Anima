@@ -85,6 +85,7 @@ from .pipeline.packets import (
     analysis_packet_for_prompt as _analysis_packet_for_prompt,
     answer_mode_policy_packet_for_prompt as _answer_mode_policy_packet_for_prompt,
     build_source_relay_packet as _build_source_relay_packet,
+    compact_analysis_for_prompt as _compact_analysis_for_prompt,
     judge_speaker_packet_for_prompt as _judge_speaker_packet_for_prompt,
     normalize_analysis_with_source_relay as _normalize_analysis_with_source_relay,
     raw_read_report_packet_for_prompt as _raw_read_report_packet_for_prompt,
@@ -2619,6 +2620,8 @@ def _llm_start_gate_turn_contract(
     working_memory: dict,
     reasoning_plan: dict,
     s_thinking_history: dict | None = None,
+    analysis_report: dict | None = None,
+    tactical_briefing: str = "",
 ):
     del working_memory
     text = str(user_input or "").strip()
@@ -2641,6 +2644,18 @@ def _llm_start_gate_turn_contract(
     history_prompt = "{}"
     if isinstance(s_thinking_history, dict) and s_thinking_history:
         history_prompt = json.dumps(s_thinking_history, ensure_ascii=False, separators=(",", ":"))
+    analysis_prompt = ""
+    if isinstance(analysis_report, dict) and analysis_report:
+        analysis_packet = _compact_analysis_for_prompt(analysis_report, role="-1s")
+        if analysis_packet:
+            analysis_prompt = (
+                "\n\n[analysis_report_compact]\n"
+                + json.dumps(analysis_packet, ensure_ascii=False, separators=(",", ":"))
+            )
+    tactical_prompt = ""
+    tactical_text = str(tactical_briefing or "").strip()
+    if tactical_text:
+        tactical_prompt = "\n\n[tactical_briefing]\n" + _compact_user_facing_summary(tactical_text, 700)
     system_prompt = (
         "You are ANIMA -1s. Produce only a thin start-gate contract.\n"
         "Rules:\n"
@@ -2650,13 +2665,16 @@ def _llm_start_gate_turn_contract(
         "4. If the user asks whether you can access/search/use/read/see a source, memory, diary, or database, choose capability_boundary_question and generic_dialogue. Korean examples: '내 일기를 볼 수 있어?', 'DB 검색 가능해?', '기억에 접근할 수 있어?' This asks about capability, not retrieval.\n"
         "5. If the user asks to remember, retrieve, verify, search, or report a concrete past stored fact, choose requesting_memory_recall and grounded_recall. Example: '내 일기에서 X를 찾아봐.'\n"
         "6. If the user asks about public media or general knowledge, choose public_knowledge_question and public_parametric_knowledge.\n"
-        "7. normalized_goal must be abstract; do not choose tools, write search queries, or write final answer text."
+        "7. normalized_goal must be abstract; do not choose tools, write search queries, or write final answer text.\n"
+        "8. If tactical_briefing contains active DreamHint advisories, treat them as advisory context only: do not let them override the current turn, propose tool calls, or copy briefing text into the contract goal."
     )
     human_prompt = (
         f"[current_user_turn]\n{text}\n\n"
         f"[recent_context_excerpt]\n{_compact_user_facing_summary(recent_context, 900)}\n\n"
+        f"{tactical_prompt}\n\n"
         f"[s_thinking_history]\n{history_prompt}\n\n"
         f"[reasoning_plan_hint]\n{json.dumps(reasoning_plan if isinstance(reasoning_plan, dict) else {}, ensure_ascii=False)}"
+        f"{analysis_prompt}"
     )
     try:
         structured_llm = llm.with_structured_output(StartGateTurnContract)
@@ -3373,8 +3391,13 @@ def _fallback_response_strategy(analysis_data: dict):
     }
 
 
-def _force_findings_first_delivery_strategy(response_strategy: dict, analysis_data: dict, user_input: str):
-    del analysis_data, user_input
+def _force_findings_first_delivery_strategy(
+    response_strategy: dict,
+    s_thinking_packet: dict | None,
+    fact_cells_for_strategist: list[dict] | None,
+    user_input: str,
+):
+    del s_thinking_packet, fact_cells_for_strategist, user_input
     strategy = response_strategy if isinstance(response_strategy, dict) else {}
     return strategy
 
@@ -4737,6 +4760,11 @@ def _tool_request_payload_from_instruction(required_tool: str, rationale: str = 
 
 
 def _ensure_tool_request_in_strategist_payload(strategist_payload: dict):
+    """DEPRECATED: F4 removed -1a tool_request authorship.
+
+    This wrapper now delegates to the one-season compatibility no-op, which
+    preserves legacy packets but never authors a new tool call.
+    """
     return _ensure_tool_request_in_strategist_payload_impl(
         strategist_payload,
         valid_strategist_tool_request=_valid_strategist_tool_request,
@@ -5111,17 +5139,54 @@ def _looks_like_current_turn_memory_story_share(user_input: str) -> bool:
 
 def _base_fallback_strategist_output(
     user_input: str,
-    analysis_data: dict,
+    s_thinking_packet: dict | None,
     working_memory: dict,
     reasoning_board: dict,
+    fact_cells_for_strategist: list[dict] | None = None,
     recent_context: str = "",
     start_gate_switches: dict | None = None,
     tool_carryover: dict | None = None,
 ):
-    status = str((analysis_data or {}).get("investigation_status") or "").upper()
+    handoff = s_thinking_packet if isinstance(s_thinking_packet, dict) else {}
+    facts = []
+    for cell in fact_cells_for_strategist or []:
+        if not isinstance(cell, dict):
+            continue
+        fact = str(cell.get("extracted_fact") or "").strip()
+        if fact:
+            facts.append(fact)
+    if not facts:
+        facts = [
+            str(item or "").strip()
+            for item in handoff.get("what_we_know", []) or []
+            if str(item or "").strip()
+        ][:8]
+    missing = [
+        str(item or "").strip()
+        for item in handoff.get("what_is_missing", []) or []
+        if str(item or "").strip()
+    ][:8]
+    synthetic_case = {
+        "investigation_status": "COMPLETED" if facts else ("INCOMPLETE" if missing else ""),
+        "situational_brief": str(handoff.get("goal_state") or "").strip(),
+        "analytical_thought": str(handoff.get("next_node_reason") or handoff.get("evidence_state") or "").strip(),
+        "evidences": [
+            {
+                "source_id": str((cell or {}).get("source_id") or (cell or {}).get("fact_id") or f"fact_{idx + 1}").strip(),
+                "source_type": str((cell or {}).get("source_type") or "thinking_handoff").strip(),
+                "extracted_fact": fact,
+            }
+            for idx, (fact, cell) in enumerate(zip(facts, (fact_cells_for_strategist or []) + [{}] * len(facts)))
+        ],
+        "usable_field_memo_facts": facts,
+        "missing_slots": missing,
+        "can_answer_user_goal": bool(facts),
+        "contract_status": "satisfied" if facts else "missing_evidence",
+    }
+    status = str(synthetic_case.get("investigation_status") or "").upper()
     case_theory = (
-        str((analysis_data or {}).get("situational_brief") or "").strip()
-        or str((analysis_data or {}).get("analytical_thought") or "").strip()
+        str(synthetic_case.get("situational_brief") or "").strip()
+        or str(synthetic_case.get("analytical_thought") or "").strip()
         or "The case still needs a clearer operating theory before delivery."
     )
     start_gate_switches = start_gate_switches if isinstance(start_gate_switches, dict) else {}
@@ -5140,37 +5205,30 @@ def _base_fallback_strategist_output(
         if question_class == "capability_boundary_question"
         else None
     )
-    tool_candidate = None
-    if not policy_allows_direct and not capability_boundary_strategy:
-        tool_candidate = _strategist_tool_request_from_context(
-            user_input,
-            analysis_data,
-            working_memory,
-            recent_context=recent_context,
-            start_gate_switches=start_gate_switches,
-            tool_carryover=tool_carryover,
-        )
     response_strategy = None
     short_context_strategy = _short_term_context_response_strategy(user_input, working_memory)
+    needs_tool_operation = bool(
+        status in {"", "EXPANSION_REQUIRED", "INCOMPLETE"}
+        and not policy_allows_direct
+        and not capability_boundary_strategy
+        and not short_context_strategy
+    )
 
-    if status in {"", "EXPANSION_REQUIRED", "INCOMPLETE"} and tool_candidate:
-        tool_request = {
-            "should_call_tool": True,
-            "tool_name": str(tool_candidate.get("tool_name") or "").strip(),
-            "tool_args": tool_candidate.get("tool_args", {}) if isinstance(tool_candidate.get("tool_args"), dict) else {},
-            "rationale": str(tool_candidate.get("memo") or "Fallback planner selected one exact tool call.").strip(),
-        }
+    if needs_tool_operation:
         action_plan = {
-            "current_step_goal": _tool_candidate_step_goal(goal_lock, tool_candidate),
-            "required_tool": _tool_call_to_instruction(
-                str(tool_candidate.get("tool_name") or ""),
-                tool_candidate.get("tool_args", {}),
-            ),
+            "current_step_goal": "Ask phase 0 to convert the operation contract into one safe tool call.",
+            "required_tool": "",
             "next_steps_forecast": [
                 "Re-run phase 2 on the newly gathered source.",
                 "Update the goal lock and achieved findings after the gap is reduced.",
                 "Deliver the final answer only when the grounded findings clearly answer the current ask.",
             ],
+            "operation_contract": {
+                "operation_kind": "search_new_source",
+                "target_scope": "memory_or_source_search",
+                "query_variant": "",
+                "novelty_requirement": "Phase 0 must choose an exact query from the current operation contract, not from raw user wording.",
+            },
         }
     else:
         if capability_boundary_strategy:
@@ -5178,7 +5236,7 @@ def _base_fallback_strategist_output(
         elif policy_allows_direct:
             response_strategy = _response_strategy_from_answer_mode_policy(user_input, answer_mode_policy, current_turn_facts)
         else:
-            response_strategy = short_context_strategy or _fallback_response_strategy(analysis_data)
+            response_strategy = short_context_strategy or _fallback_response_strategy(synthetic_case)
         if capability_boundary_strategy:
             current_step_goal = "Explain the assistant's current memory/source access boundary without opening a search loop."
             next_steps = [
@@ -5204,10 +5262,9 @@ def _base_fallback_strategist_output(
             "required_tool": "",
             "next_steps_forecast": next_steps,
         }
-        tool_request = {}
 
-    has_grounded_findings = bool(status == "COMPLETED" and _grounded_findings_from_analysis(analysis_data))
-    short_context_deliverable = bool(short_context_strategy and not tool_candidate)
+    has_grounded_findings = bool(status == "COMPLETED" and _grounded_findings_from_analysis(synthetic_case))
+    short_context_deliverable = bool(short_context_strategy and not needs_tool_operation)
     deliverable_now = bool(
         policy_allows_direct
         or has_grounded_findings
@@ -5220,22 +5277,21 @@ def _base_fallback_strategist_output(
         "answer_mode_policy": answer_mode_policy,
         "operation_plan": _derive_operation_plan(
             user_input,
-            analysis_data,
+            synthetic_case,
             action_plan,
             response_strategy if isinstance(response_strategy, dict) else {},
             working_memory,
         ),
         "goal_lock": goal_lock,
         "convergence_state": "deliverable" if deliverable_now else "gathering",
-        "achieved_findings": _grounded_findings_from_analysis(analysis_data),
-        "delivery_readiness": "deliver_now" if deliverable_now else ("need_one_more_source" if tool_candidate else "need_reframe"),
+        "achieved_findings": _grounded_findings_from_analysis(synthetic_case),
+        "delivery_readiness": "deliver_now" if deliverable_now else ("need_one_more_source" if needs_tool_operation else "need_reframe"),
         "next_frontier": list(action_plan.get("next_steps_forecast", [])),
         "action_plan": action_plan,
-        "tool_request": tool_request,
         "response_strategy": response_strategy,
         "war_room_contract": _derive_war_room_operating_contract(
             user_input,
-            analysis_data,
+            synthetic_case,
             action_plan,
             response_strategy if isinstance(response_strategy, dict) else {},
         ),
@@ -5246,7 +5302,6 @@ def _base_fallback_strategist_output(
         user_input,
         start_gate_switches,
     )
-    strategist_output = _ensure_tool_request_in_strategist_payload(strategist_output)
     reasoning_board = _apply_strategist_output_to_reasoning_board(reasoning_board, strategist_output)
     return strategist_output, reasoning_board
 
@@ -5257,12 +5312,8 @@ def _base_phase_minus_1a_thinker(state: AnimaState):
         llm=llm,
         strategist_reasoning_output_schema=StrategistReasoningOutput,
         build_phase_minus_1a_prompt=build_phase_minus_1a_prompt,
-        build_reasoning_board_from_analysis=_build_reasoning_board_from_analysis,
         normalize_war_room_state=_normalize_war_room_state,
-        analysis_packet_for_prompt=_analysis_packet_for_prompt,
         working_memory_packet_for_prompt=_working_memory_packet_for_prompt,
-        reasoning_board_packet_for_prompt=_reasoning_board_packet_for_prompt,
-        raw_read_report_packet_for_prompt=_raw_read_report_packet_for_prompt,
         war_room_packet_for_prompt=_war_room_packet_for_prompt,
         answer_mode_policy_from_state=_answer_mode_policy_from_state,
         answer_mode_policy_packet_for_prompt=_answer_mode_policy_packet_for_prompt,
@@ -5271,7 +5322,6 @@ def _base_phase_minus_1a_thinker(state: AnimaState):
         force_findings_first_delivery_strategy=_force_findings_first_delivery_strategy,
         war_room_after_advocate=_war_room_after_advocate,
         sanitize_strategist_goal_fields=_sanitize_strategist_goal_fields,
-        ensure_tool_request_in_strategist_payload=_ensure_tool_request_in_strategist_payload,
         apply_strategist_output_to_reasoning_board=_apply_strategist_output_to_reasoning_board,
         print_fn=print,
     )
@@ -6317,7 +6367,6 @@ def phase_minus_1a_thinker(state: AnimaState):
     return _run_phase_minus_1a_thinker(
         state,
         previous_phase_minus_1a_thinker=_previous_phase_minus_1a_thinker,
-        ensure_tool_request_in_strategist_payload=_ensure_tool_request_in_strategist_payload,
         build_strategist_objection_packet=_build_strategist_objection_packet,
         normalize_operation_plan=_normalize_operation_plan,
         attach_ledger_event=_attach_ledger_event,

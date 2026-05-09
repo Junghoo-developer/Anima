@@ -209,16 +209,18 @@ def build_delivery_review_sys_prompt(context_prompt: str) -> str:
         "Review only the already-written phase_3 answer.\n\n"
         f"[DELIVERY_REVIEW_CONTEXT]\n{context_prompt}\n\n"
         "Rules:\n"
-        "1. Compare final_answer against evidences, usable_field_memo_facts, preserved_rescue_facts, and must_include_facts.\n"
-        "2. If final_answer cites a factual claim not supported there, set verdict=remand and reason=hallucination.\n"
-        "3. If final_answer omits a required must_include_fact, set verdict=remand and reason=omission.\n"
+        "1. Compare final_answer against fact_cells_for_review, evidences, usable_field_memo_facts, preserved_rescue_facts, and must_include_facts.\n"
+        "2. If final_answer cites a factual claim not supported there, set verdict=remand and reason_type=hallucination.\n"
+        "3. If final_answer omits a required must_include_fact, set verdict=remand and reason_type=omission.\n"
         "4. If final_answer leaks workflow words, phase names, 119, budget, rescue, handoff, or slot keys, set verdict=remand and reason=tone.\n"
         "5. Otherwise set verdict=approve. Use sos_119 only when another remand cannot make a useful answer.\n\n"
         "Footer:\n"
-        "- Output DeliveryReview.v1 JSON only.\n"
+        "- Output DeliveryReview.v1 JSON only with fields: verdict, reason, reason_type, evidence_refs, delta, issues_found, remand_target, remand_guidance.\n"
+        "- reason_type values: hallucination | omission | contradiction | thought_gap | tool_misuse | empty string.\n"
+        "- For hallucination, omission, or contradiction, evidence_refs must cite only fact_id values present in fact_cells_for_review; never invent fact_ids.\n"
+        "- remand_target may be empty because code derives it from reason_type.\n"
         "- Do not call tools, generate queries, or rewrite the answer.\n"
         "- Do not change answer_mode; review the answer under the provided boundary.\n"
-        "- remand_target must be -1a for evidence/omission issues and -1s for goal/mode confusion.\n"
     )
 
 
@@ -232,14 +234,11 @@ def build_phase_minus_1a_prompt(
     tolerance: float,
     bio_status: str,
     songryeon_thoughts: str,
-    tactical_briefing: str,
     working_memory_packet: str,
     tool_carryover_packet: str,
     start_gate_review_packet: str,
-    reasoning_board_packet: str,
+    fact_cells_packet: str,
     auditor_memo: str,
-    analysis_packet: str,
-    raw_read_packet: str,
     war_room_packet: str,
     answer_mode_policy_packet: str = "N/A",
     evidence_ledger_packet: str = "N/A",
@@ -261,23 +260,24 @@ def build_phase_minus_1a_prompt(
         f"[global_tolerance]\n{tolerance}\n\n"
         f"[biolink_status]\n{bio_status}\n\n"
         f"[songryeon_thoughts]\n{songryeon_thoughts}\n\n"
-        f"[tactical_briefing]\n{tactical_briefing}\n\n"
         f"[working_memory]\n{working_memory_packet}\n\n"
         f"[tool_carryover]\n{tool_carryover_packet}\n\n"
         f"[s_thinking_packet]\n{s_thinking_packet}\n\n"
+        f"[fact_cells]\n{fact_cells_packet}\n\n"
         f"[strategist_goal]\n{strategist_goal_packet}\n\n"
         f"[start_gate_review]\n{start_gate_review_packet}\n\n"
-        f"[reasoning_board]\n{reasoning_board_packet}\n\n"
         f"[auditor_memo]\n{auditor_memo if auditor_memo else 'N/A'}\n\n"
-        f"[analysis_report]\n{analysis_packet}\n\n"
-        f"[raw_read_report]\n{raw_read_packet}\n\n"
         f"[war_room_state]\n{war_room_packet}\n\n"
         "Rules:\n"
         "1. Build goals in this order: goal_contract -> strategist_goal -> action_plan. normalized_goal is a legacy alias only.\n"
         "2. Fill strategist_goal, goal_lock, action_plan, delivery_readiness, achieved_findings, and next_frontier; never make the final routing choice.\n"
-        "3. response_strategy.must_include_facts may contain only phase_2 evidences, usable_field_memo_facts, or current-turn facts already admitted by answer_mode_policy.\n"
-        "4. If evidence is missing, plan one narrow next step or exact tool_request; keep response_strategy empty or minimal.\n"
-        "5. Do not pass the whole user sentence as a search query; if action_plan.required_tool is executable, mirror it in tool_request with schema-valid args.\n"
+        "3. Treat s_thinking_packet (ThinkingHandoff.v1) as the primary case state: what_we_know, what_is_missing, next_node_reason, and constraints.\n"
+        "4. response_strategy.must_include_facts may contain only fact_cells cited by fact_id or current-turn facts already admitted by answer_mode_policy.\n"
+        "5. Do not re-judge facts. Fact judgment authority belongs to -1s/2b; cite fact_cells instead of relitigating them.\n"
+        "6. Do not author tool calls. Phase 0 supervisor decides exact tool name, args, and queries from operation_contract.\n"
+        "7. If no tool is needed, set delivery_readiness=deliver_now and leave action_plan.required_tool empty.\n"
+        "8. If evidence is missing, describe one narrow operation_contract intent; keep response_strategy empty or minimal.\n"
+        "9. Do not pass the whole user sentence as a search query.\n"
     )
 
 

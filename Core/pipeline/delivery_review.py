@@ -14,11 +14,13 @@ import unicodedata
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from ..prompt_builders import build_delivery_review_sys_prompt
-from .contracts import DeliveryReview
+from .contracts import DELIVERY_REVIEW_REASON_TYPES, DeliveryReview
+from .packets import _compact_fact_cells_for_prompt
 
 DELIVERY_REVIEW_SCHEMA = "DeliveryReview.v1"
 DELIVERY_REVIEW_VERDICTS = {"approve", "remand", "sos_119"}
 DELIVERY_REVIEW_REMAND_TARGETS = {"", "-1a", "-1s"}
+DELIVERY_REVIEW_REASON_TYPE_SET = set(DELIVERY_REVIEW_REASON_TYPES)
 
 
 def _compact_text(value, limit: int = 500):
@@ -42,6 +44,33 @@ def _compact_list(values, limit: int = 8, text_limit: int = 240):
         if len(result) >= limit:
             break
     return result
+
+
+def _compact_evidence_refs(values, limit: int = 8, text_limit: int = 120):
+    if not isinstance(values, list):
+        return []
+    result = []
+    seen = set()
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        text = _compact_text(value, text_limit)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _infer_reason_type_from_issues(values):
+    text = " ".join(str(value or "") for value in values if str(value or "").strip()).lower()
+    if "hallucination" in text or "unsupported" in text:
+        return "hallucination"
+    if "missing" in text or "omit" in text:
+        return "omission"
+    return ""
 
 
 def _safe_jsonable(value):
@@ -168,17 +197,31 @@ def normalize_delivery_review(packet: dict | None):
     target = str(packet.get("remand_target") or "").strip()
     if target not in DELIVERY_REVIEW_REMAND_TARGETS:
         target = ""
+    reason_type = str(packet.get("reason_type") or "").strip()
+    if reason_type not in DELIVERY_REVIEW_REASON_TYPE_SET:
+        reason_type = ""
+    evidence_refs = _compact_evidence_refs(packet.get("evidence_refs", []), 8, 120)
+    delta = _compact_text(packet.get("delta"), 280)
     if verdict == "approve":
         target = ""
     elif verdict == "sos_119":
         target = ""
+    elif reason_type in {"hallucination", "omission", "contradiction", "thought_gap"}:
+        target = "-1s"
+    elif reason_type == "tool_misuse":
+        target = "-1a"
     guidance = _compact_text(packet.get("remand_guidance"), 700)
+    if not guidance and delta:
+        guidance = delta
     if re.search(r"\btool_[a-zA-Z0-9_]+\s*\(", guidance):
         guidance = "Reviewer cannot author tool calls; remand target must decide any further action."
     return {
         "schema": str(packet.get("schema") or DELIVERY_REVIEW_SCHEMA),
         "verdict": verdict,
         "reason": _compact_text(packet.get("reason"), 700),
+        "reason_type": reason_type,
+        "evidence_refs": evidence_refs,
+        "delta": delta,
         "issues_found": _compact_list(packet.get("issues_found", []), 8, 220),
         "remand_target": target,
         "remand_guidance": guidance,
@@ -232,6 +275,9 @@ def build_delivery_review_context(state: dict | None, final_answer: str = ""):
     speaker_review = state.get("speaker_review", {})
     if not isinstance(speaker_review, dict):
         speaker_review = {}
+    reasoning_board = state.get("reasoning_board", {})
+    if not isinstance(reasoning_board, dict):
+        reasoning_board = {}
     return {
         "schema": "DeliveryReviewContext.v1",
         "user_input": _compact_text(state.get("user_input"), 1200),
@@ -241,6 +287,7 @@ def build_delivery_review_context(state: dict | None, final_answer: str = ""):
         "analysis_report": _analysis_review_projection(state.get("analysis_report", {})),
         "response_strategy": _response_strategy_review_projection(state.get("response_strategy", {})),
         "rescue_handoff_packet": _rescue_review_projection(state.get("rescue_handoff_packet", {})),
+        "fact_cells_for_review": _compact_fact_cells_for_prompt(reasoning_board.get("fact_cells", []), limit=10),
         "phase3_delivery_summary": {
             "answer_mode": _compact_text(payload.get("answer_mode"), 120),
             "ready_for_delivery": bool(payload.get("ready_for_delivery")),
@@ -287,7 +334,19 @@ def _merge_review_with_speaker_guard(llm_review: dict | None, guard_review: dict
             8,
             220,
         )
+        if not merged.get("reason_type"):
+            merged["reason_type"] = _infer_reason_type_from_issues(merged.get("issues_found", []))
         return normalize_delivery_review(merged)
+    if guard.get("verdict") == "remand" and not review.get("reason_type"):
+        enriched = dict(review)
+        inferred = _infer_reason_type_from_issues(
+            list(review.get("issues_found", [])) + list(guard.get("issues_found", []))
+        )
+        if inferred:
+            enriched["reason_type"] = inferred
+            if not enriched.get("delta"):
+                enriched["delta"] = guard.get("reason") or "The speaker guard found a delivery issue."
+            return normalize_delivery_review(enriched)
     return review
 
 

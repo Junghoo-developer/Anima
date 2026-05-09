@@ -155,10 +155,14 @@ def _strategist_no_tool_delivery_ready(state: AnimaState) -> bool:
 
 def route_after_s_thinking(state: AnimaState):
     packet = state.get("s_thinking_packet", {})
-    routing = packet.get("routing_decision", {}) if isinstance(packet, dict) else {}
-    if not isinstance(routing, dict):
-        routing = {}
-    next_node = str(routing.get("next_node") or "").strip()
+    if not isinstance(packet, dict):
+        packet = {}
+    next_node = str(packet.get("next_node") or "").strip()
+    if not next_node:
+        routing = packet.get("routing_decision", {})
+        if not isinstance(routing, dict):
+            routing = {}
+        next_node = str(routing.get("next_node") or "").strip()
     if next_node in {"119", "phase_119"}:
         _log("[System] -1s requested phase_119.")
         return "phase_119"
@@ -172,8 +176,8 @@ def route_after_s_thinking(state: AnimaState):
         _log("[System] -1s requests -1a planning.")
         return "-1a_thinker"
 
-    # Compatibility fallback for older start-gate packets while the live path
-    # migrates to s_thinking_packet.routing_decision.
+    # Compatibility fallback for malformed or older start-gate packets while
+    # the live path uses ThinkingHandoff.v1 top-level next_node.
     return route_audit_result_v2(state)
 
 
@@ -185,13 +189,13 @@ def route_after_strategist(state: AnimaState):
     if not isinstance(strategist_output, dict):
         strategist_output = {}
     if _executable_tool_request(strategist_output):
-        _log("[System] -1a supplied a tool_request; routing to 0_supervisor.")
+        _log("[System] Deprecated -1a tool_request detected; routing to 0_supervisor.")
         return "0_supervisor"
     if _strategist_no_tool_delivery_ready(state):
         _log("[System] -1a supplied a no-tool delivery contract; routing to phase_3.")
         return "phase_3"
-    _log("[System] -1a completed without an executable tool_request; returning to -1s.")
-    return "-1s_start_gate"
+    _log("[System] -1a asks phase 0 to select the concrete tool operation.")
+    return "0_supervisor"
 
 
 def route_after_phase3(state: AnimaState):
@@ -361,7 +365,6 @@ workflow.add_conditional_edges(
         "0_supervisor": "0_supervisor",
         "phase_3": "phase_3",
         "phase_119": "phase_119",
-        "-1s_start_gate": "-1s_start_gate",
     },
 )
 workflow.add_conditional_edges(

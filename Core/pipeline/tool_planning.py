@@ -125,26 +125,14 @@ def ensure_tool_request_in_strategist_payload(
     normalize_action_plan: Callable[[dict | None], dict],
     tool_request_payload_from_instruction: Callable[[str, str], dict],
 ):
-    normalized = json.loads(json.dumps(strategist_payload if isinstance(strategist_payload, dict) else {}, ensure_ascii=False))
-    existing = normalized.get("tool_request", {})
-    if isinstance(existing, dict):
-        candidate = valid_strategist_tool_request(existing)
-        if candidate:
-            normalized["tool_request"] = {
-                "should_call_tool": True,
-                "tool_name": candidate["tool_name"],
-                "tool_args": candidate["tool_args"],
-                "rationale": candidate["memo"],
-            }
-            return normalized
+    """DEPRECATED: F4 removed -1a tool_request authorship.
 
-    action_plan = normalize_action_plan(normalized.get("action_plan", {}))
-    required_tool = str(action_plan.get("required_tool") or "").strip()
-    normalized["tool_request"] = tool_request_payload_from_instruction(
-        required_tool,
-        rationale="action_plan.required_tool supplied an exact phase 0 tool call.",
-    )
-    return normalized
+    This helper is a no-op stub kept for one-season compatibility. It preserves
+    any legacy `tool_request` already present on read-side packets but never
+    promotes `action_plan.required_tool` into a new executable tool request.
+    """
+    del valid_strategist_tool_request, normalize_action_plan, tool_request_payload_from_instruction
+    return json.loads(json.dumps(strategist_payload if isinstance(strategist_payload, dict) else {}, ensure_ascii=False))
 
 
 def decision_from_strategist_tool_contract(

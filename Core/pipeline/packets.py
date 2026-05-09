@@ -145,6 +145,26 @@ def _compact_rejected_sources_for_prompt(values, limit: int = 6):
 
 def compact_s_thinking_packet_for_prompt(packet: dict, *, role: str = "general"):
     source = packet if isinstance(packet, dict) else {}
+    if any(key in source for key in ("producer", "recipient", "goal_state", "next_node", "what_we_know")):
+        target = _clip_text(source.get("next_node") or source.get("recipient"), 40)
+        if target == "119":
+            target = "phase_119"
+        recipient = _clip_text(source.get("recipient") or target, 40)
+        if recipient == "119":
+            recipient = "phase_119"
+        return {
+            "schema": "ThinkingHandoff.v1",
+            "producer": _clip_text(source.get("producer"), 40) or "-1s",
+            "recipient": recipient or target or "-1a",
+            "goal_state": _clip_text(source.get("goal_state"), 220),
+            "evidence_state": _clip_text(source.get("evidence_state"), 260),
+            "what_we_know": _clip_string_list(source.get("what_we_know", []), 8, 220),
+            "what_is_missing": _clip_string_list(source.get("what_is_missing", []), 8, 180),
+            "next_node": target or recipient or "-1a",
+            "next_node_reason": _clip_text(source.get("next_node_reason"), 220 if role == "strategist" else 180),
+            "constraints_for_next_node": _clip_string_list(source.get("constraints_for_next_node", []), 6, 180),
+        }
+
     situation = source.get("situation_thinking", {})
     if not isinstance(situation, dict):
         situation = {}
@@ -157,26 +177,25 @@ def compact_s_thinking_packet_for_prompt(packet: dict, *, role: str = "general")
     routing = source.get("routing_decision", {})
     if not isinstance(routing, dict):
         routing = {}
+    next_node = _clip_text(routing.get("next_node"), 40)
+    if next_node == "119":
+        next_node = "phase_119"
+    goal_state_parts = [
+        _clip_text(situation.get("domain"), 80),
+        _clip_text(situation.get("user_intent"), 100),
+    ]
+    goal_state = " | ".join(part for part in goal_state_parts if part)
     return {
-        "schema": _clip_text(source.get("schema"), 80) or "SThinkingPacket.v1",
-        "situation_thinking": {
-            "user_intent": _clip_text(situation.get("user_intent"), 80),
-            "domain": _clip_text(situation.get("domain"), 80),
-            "key_facts_needed": _clip_string_list(situation.get("key_facts_needed", []), 4, 140),
-        },
-        "loop_summary": {
-            "attempted_so_far": _clip_string_list(loop_summary.get("attempted_so_far", []), 5, 80),
-            "current_evidence_state": _clip_text(loop_summary.get("current_evidence_state"), 180),
-            "gaps": _clip_string_list(loop_summary.get("gaps", []), 4, 140),
-        },
-        "next_direction": {
-            "suggested_focus": _clip_text(next_direction.get("suggested_focus"), 180),
-            "avoid": _clip_string_list(next_direction.get("avoid", []), 4, 120),
-        },
-        "routing_decision": {
-            "next_node": _clip_text(routing.get("next_node"), 40),
-            "reason": _clip_text(routing.get("reason"), 220 if role == "strategist" else 160),
-        },
+        "schema": "ThinkingHandoff.v1",
+        "producer": "-1s",
+        "recipient": next_node or "-1a",
+        "goal_state": goal_state,
+        "evidence_state": _clip_text(loop_summary.get("current_evidence_state"), 260),
+        "what_we_know": [],
+        "what_is_missing": _clip_string_list(loop_summary.get("gaps", []), 8, 180),
+        "next_node": next_node or "-1a",
+        "next_node_reason": _clip_text(routing.get("reason"), 220 if role == "strategist" else 180),
+        "constraints_for_next_node": _clip_string_list(next_direction.get("avoid", []), 6, 180),
     }
 
 
@@ -790,11 +809,13 @@ def _compact_fact_cells_for_prompt(values, limit: int = 8):
     for fact in _clip_list(values, limit):
         if not isinstance(fact, dict):
             continue
+        extracted_fact = fact.get("extracted_fact") or fact.get("claim") or fact.get("fact") or fact.get("text")
         projected.append({
             "fact_id": _clip_text(fact.get("fact_id"), 120),
-            "claim": _clip_text(fact.get("claim") or fact.get("fact") or fact.get("text"), 260),
+            "extracted_fact": _clip_text(extracted_fact, 260),
             "source_id": _clip_text(fact.get("source_id"), 140),
-            "status": _clip_text(fact.get("status") or fact.get("audit_status"), 80),
+            "source_type": _clip_text(fact.get("source_type"), 80),
+            "excerpt": _clip_text(fact.get("excerpt"), 160),
         })
     return projected
 
