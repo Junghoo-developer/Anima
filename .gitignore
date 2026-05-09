@@ -7,6 +7,12 @@ __pycache__/
 venv/
 env/
 
+# 정후 사적 자료 — GitHub 노출 금지 (2026-05-09 결재)
+Songryeon_user_diary/
+
+# tests/ 정후 결재 (2026-05-09): untrack 박음
+tests/
+
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
