@@ -1175,3 +1175,26 @@ Recent thin-controller cleanup:
     to phase 0 with a deprecated log. New tests cover strategist schema/no-op
     compatibility, supervisor general-flow prompts, and graph routing. Full tests:
     `294 OK`.
+74. **V4 §1-A 현장 루프 권한표 LIVE (Phase 0 → 1 진입 marker)** completed (2026-05-09).
+    Constitution `ANIMA_FIELD_LOOP_V4_CONSTITUTION.md` §1-A body written (217 → 524
+    lines). Defines V4 node roles: -1s = situation judge (사용자 의도 정제 + 사고 흐름 추적
+    + 라우팅, 목표 수립 X), -1a = goal-setter (작전 목표 + 실행계획, 라우팅 X),
+    2b = fact judge + thought critic (mode auto-switch). Adds 1-A.11 fallback
+    privileges (7 fallbacks as legitimate safety nets), 1-A.12 routing-case table
+    (9 rows including the deterministic gate `has_goal AND fact_cells==0 AND
+    no_tool_needed`), and 1-A.13 trio-recursion anchor (V4 §0 부록 Y v1.0 *first
+    instance*) for §1-C reference. V4 §2 candidates (12 prohibitions including
+    `(k) -1s 목표 수립 X` and `(l) -1a 라우팅 결정 X`) recorded in decision sheet
+    v3.1. §1-B/C/D/E remain placeholder. Phase 0 → 1 entry gate satisfied
+    (midnight modules ≥3 ✓, nodes.py heuristics ≤2 ✓, 294 OK ✓, V4 §1-A LIVE ✓).
+75. **V4 Phase 1 #CR1 발주 stand-by** (2026-05-09).
+    `Orders/V4_Phase_1/order_CR1.md` + `CR1_codex_dispatch.md` written. Scope:
+    2b thought_critic mode + ThoughtCritique.v1 schema + `_strategist_needs_thought_recursion`
+    deterministic gate + ThinkingHandoff Literal extension (warroom_deliberator /
+    2b_thought_critic recipients) + -1s second-call verification rule + new graph
+    branches (route_after_strategist gate, route_after_s_thinking new options,
+    2b_thought_critic → -1s_start_gate recursion) + new module
+    `Core/pipeline/thought_critic.py`. Target ~230 lines + 13 new tests
+    (294 → 307 OK). Realizes the V4 §1-A.13 trio-recursion anchor in code.
+    Parallel-eligible with T1 / B9 / B10 / C0.8/0.9/0.10. TR1 (1-turn verify of
+    F4 fix on the 정후 무한 핑퐁 trace case) recommended pre-CR1.
