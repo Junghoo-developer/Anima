@@ -72,6 +72,10 @@ def _handoff_next_node(value: str) -> str:
         return "phase_3"
     if target in {"-1a", "-1a_thinker", "plan_with_strategist"}:
         return "-1a"
+    if target in {"warroom_deliberator", "warroom"}:
+        return "warroom_deliberator"
+    if target in {"2b_thought_critic", "thought_critic"}:
+        return "2b_thought_critic"
     return "-1a"
 
 
@@ -350,6 +354,12 @@ def run_phase_minus_1s_start_gate(
     }
     analysis_delivery_allowed = _analysis_report_allows_delivery(state.get("analysis_report", {}))
     budget_exhausted = _start_gate_budget_exhausted(state, reasoning_budget)
+    turn_contract = start_gate_contract.get("turn_contract", {})
+    if not isinstance(turn_contract, dict):
+        turn_contract = {}
+    recursion_next_node = _handoff_next_node(turn_contract.get("recursion_next_node", ""))
+    recursion_route_reason = str(turn_contract.get("recursion_route_reason") or "").strip()
+    has_prior_critique = isinstance(state.get("prior_thought_critique"), dict) and bool(state.get("prior_thought_critique"))
 
     if budget_exhausted and not start_gate_contract["direct_delivery_allowed"] and not analysis_delivery_allowed:
         memo = "The reasoning budget is exhausted, so -1s sends the turn to phase_119 with preserved runtime context."
@@ -430,6 +440,43 @@ def run_phase_minus_1s_start_gate(
             "reasoning_budget": reasoning_budget,
             "reasoning_plan": reasoning_plan,
         }, state, source_kind="start_gate_contract", producer_node="-1s_start_gate", source_ref="direct_delivery_allowed", content=start_gate_contract, confidence=0.8)
+
+    if (
+        has_prior_critique
+        and recursion_next_node in {"warroom_deliberator", "2b_thought_critic", "phase_119"}
+    ):
+        memo = (
+            recursion_route_reason
+            or "CR1 recursion mode: prior thought critique changed the -1s input, so route to the selected recursion handler."
+        )
+        s_thinking_packet = _build_s_thinking_packet(
+            start_gate_contract=start_gate_contract,
+            start_gate_review=start_gate_review,
+            start_gate_switches=start_gate_switches,
+            reasoning_plan=reasoning_plan,
+            next_node=recursion_next_node,
+            route_reason=memo,
+            analysis_report=state.get("analysis_report", {}),
+        )
+        s_thinking_history = build_cumulative_s_thinking_packet(
+            current=s_thinking_packet,
+            previous_history=incoming_s_thinking_history,
+        )
+        decision_action = "phase_119" if recursion_next_node == "phase_119" else "plan_with_strategist"
+        decision = make_auditor_decision(decision_action, memo=memo)
+        return attach_ledger_event({
+            "auditor_instruction": decision["instruction"],
+            "auditor_decision": decision,
+            "readiness_decision": decision.get("readiness_decision", {}),
+            "self_correction_memo": memo,
+            "start_gate_review": start_gate_review,
+            "start_gate_switches": start_gate_switches,
+            "start_gate_contract": start_gate_contract,
+            "s_thinking_packet": s_thinking_packet,
+            "s_thinking_history": s_thinking_history,
+            "reasoning_budget": reasoning_budget,
+            "reasoning_plan": reasoning_plan,
+        }, state, source_kind="start_gate_contract", producer_node="-1s_start_gate", source_ref="thought_recursion_route", content=start_gate_contract, confidence=0.8)
 
     memo = str(start_gate_switches.get("memo") or start_gate_review.get("why_short") or reasoning_plan.get("rationale") or "").strip()
     if not memo:

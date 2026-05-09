@@ -215,6 +215,14 @@ class StartGateTurnContract(BaseModel):
         description="Facts supplied by the current user turn that may ground the immediate answer.",
     )
     rationale: str = Field(default="", description="Short reason for the contract.")
+    recursion_next_node: Literal["", "phase_3", "-1a", "phase_119", "warroom_deliberator", "2b_thought_critic"] = Field(
+        default="",
+        description="Optional CR1 second-call route when prior_thought_critique is present. Empty in normal first-call mode.",
+    )
+    recursion_route_reason: str = Field(
+        default="",
+        description="Short reason for recursion_next_node. Used only as -1s routing context, not user-facing text.",
+    )
 
 
 class SThinkingSituation(BaseModel):
@@ -812,6 +820,8 @@ __all__ = [
     'SThinkingRoutingDecision',
     'SThinkingPacket',
     'ThinkingHandoff',
+    'CritiqueItem',
+    'ThoughtCritique',
     'OpsToolCard',
     'OpsNodeCard',
     'OpsDecision',

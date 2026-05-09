@@ -2591,6 +2591,8 @@ def _normalize_start_gate_turn_contract(contract: dict | StartGateTurnContract |
         "needs_planning": needs_planning,
         "current_turn_facts": _dedupe_keep_order(facts)[:4],
         "rationale": _compact_user_facing_summary(str(payload.get("rationale") or ""), 240),
+        "recursion_next_node": str(payload.get("recursion_next_node") or "").strip(),
+        "recursion_route_reason": _compact_user_facing_summary(str(payload.get("recursion_route_reason") or ""), 240),
         "contract_source": str(payload.get("contract_source") or "llm_start_gate").strip() or "llm_start_gate",
     }
 
@@ -2637,6 +2639,8 @@ def _llm_start_gate_turn_contract(
                 "needs_planning": True,
                 "current_turn_facts": [],
                 "rationale": "Empty turn.",
+                "recursion_next_node": "",
+                "recursion_route_reason": "",
             },
             text,
             recent_context,
@@ -2684,10 +2688,11 @@ def _llm_start_gate_turn_contract(
             "    Step 1 (verification, MUST run first):\n"
             "      Re-read working_memory + recent_context + s_thinking_history with the critique in mind.\n"
             "      Ask: 'Given this critique, is the evidence really thin, or did the previous step miss something?'\n"
-            "      If verified evidence is sufficient → set normalized_goal to direct_delivery and let downstream route to phase_3.\n"
+            "      If verified evidence is sufficient → set direct_delivery_allowed=true and recursion_next_node='phase_3'.\n"
             "    Step 2 (recursion routing — only if Step 1 confirms shortage):\n"
-            "      If deep deliberation is needed → signal warroom via routing context.\n"
-            "      If a lightweight follow-up is enough → still prefer phase_3 over re-looping; do not loop the critique itself.\n"
+            "      If deep deliberation is needed → set recursion_next_node='warroom_deliberator'.\n"
+            "      If one more lightweight critique is explicitly needed → set recursion_next_node='2b_thought_critic'.\n"
+            "      If a lightweight follow-up is enough → prefer phase_3; do not loop the critique itself.\n"
         )
     system_prompt = base_rules + recursion_rule
     human_prompt = (
@@ -6950,4 +6955,3 @@ def _strategist_tool_request_from_context(
         compiled_memory_recall_queries=_compiled_memory_recall_queries,
         logger=print,
     )
-
