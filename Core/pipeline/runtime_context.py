@@ -33,8 +33,12 @@ def normalize_execution_trace(trace: dict | None) -> dict[str, Any]:
     return {
         "operation_kind": str(trace.get("operation_kind") or "").strip(),
         "target_scope": str(trace.get("target_scope") or "").strip(),
+        "source_lane": str(trace.get("source_lane") or "").strip(),
+        "search_subject": str(trace.get("search_subject") or "").strip(),
+        "missing_slot": str(trace.get("missing_slot") or "").strip(),
         "query_variant": str(trace.get("query_variant") or "").strip(),
         "novelty_requirement": str(trace.get("novelty_requirement") or "").strip(),
+        "evidence_boundary": str(trace.get("evidence_boundary") or "").strip(),
         "executed_tool": str(trace.get("executed_tool") or "").strip(),
         "tool_args_signature": str(trace.get("tool_args_signature") or "").strip(),
         "read_mode": str(trace.get("read_mode") or "").strip(),

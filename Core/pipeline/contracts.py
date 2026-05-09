@@ -494,6 +494,7 @@ class OperationContract(BaseModel):
         "unspecified",
         "search_new_source",
         "read_same_source_deeper",
+        "review_personal_history",
         "extract_feature_summary",
         "compare_with_user_goal",
         "review_recent_dialogue",
@@ -505,6 +506,39 @@ class OperationContract(BaseModel):
     target_scope: str = Field(
         default="",
         description="What slice of the case/source this operation should focus on."
+    )
+    source_lane: Literal[
+        "",
+        "none",
+        "field_memo",
+        "memory",
+        "diary",
+        "gemini_chat",
+        "songryeon_chat",
+        "artifact",
+        "db_schema",
+        "recent_context",
+        "capability_boundary",
+        "mixed_private_sources",
+    ] = Field(
+        default="",
+        description="Non-executable evidence lane hint for phase 0. This is not a tool name or argument.",
+    )
+    search_subject: str = Field(
+        default="",
+        description="Compact subject of the search or evidence operation. Not an exact query.",
+    )
+    missing_slot: str = Field(
+        default="",
+        description="The specific unknown slot phase 0 should try to reduce.",
+    )
+    query_seed_candidates: List[str] = Field(
+        default_factory=list,
+        description="Short seed phrases phase 0 may transform into exact tool args. No raw full user sentence.",
+    )
+    evidence_boundary: str = Field(
+        default="",
+        description="Boundary for which source types are allowed or forbidden in this operation.",
     )
     query_variant: str = Field(
         default="",

@@ -1245,3 +1245,16 @@ Recent thin-controller cleanup:
       **307 OK** (294 baseline + 13 new, no regression).
     Status: Hybrid first draft. Awaiting Codex paste + Junghoo final review
     before §1-C (trio recursion) drafting.
+77. **V4 Phase 1 #F4.5 / O1 — operation_contract search-axis repair** completed
+    (2026-05-09). `OperationContract` now carries non-executable search-axis
+    fields (`source_lane`, `search_subject`, `missing_slot`,
+    `query_seed_candidates`, `evidence_boundary`) so -1a can give phase 0 a
+    concrete evidence lane without authoring exact tool names/args/queries.
+    `normalize_operation_contract` preserves the new fields and no longer
+    normalizes `review_personal_history` away. The -1a prompt explicitly
+    requires these fields when evidence is missing, while 0_supervisor now treats
+    them as the primary search axis and avoids searching capability-boundary
+    turns unless retrieval is explicitly requested. Execution traces preserve the
+    search axis for loop comparison. New regression coverage:
+    `test_operation_contract_f45.py` plus expanded supervisor prompt tests.
+    Full tests: **314 OK**.

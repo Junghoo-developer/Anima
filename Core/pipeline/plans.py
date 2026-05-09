@@ -35,6 +35,11 @@ def empty_operation_contract():
     return {
         "operation_kind": "unspecified",
         "target_scope": "",
+        "source_lane": "",
+        "search_subject": "",
+        "missing_slot": "",
+        "query_seed_candidates": [],
+        "evidence_boundary": "",
         "query_variant": "",
         "novelty_requirement": "",
     }
@@ -270,6 +275,7 @@ def normalize_operation_contract(contract: dict | None):
         "unspecified",
         "search_new_source",
         "read_same_source_deeper",
+        "review_personal_history",
         "extract_feature_summary",
         "compare_with_user_goal",
         "review_recent_dialogue",
@@ -278,6 +284,32 @@ def normalize_operation_contract(contract: dict | None):
         operation_kind = "unspecified"
     base["operation_kind"] = operation_kind
     base["target_scope"] = str(contract.get("target_scope") or "").strip()
+    source_lane = str(contract.get("source_lane") or "").strip()
+    if source_lane not in {
+        "",
+        "none",
+        "field_memo",
+        "memory",
+        "diary",
+        "gemini_chat",
+        "songryeon_chat",
+        "artifact",
+        "db_schema",
+        "recent_context",
+        "capability_boundary",
+        "mixed_private_sources",
+    }:
+        source_lane = ""
+    base["source_lane"] = source_lane
+    base["search_subject"] = str(contract.get("search_subject") or "").strip()
+    base["missing_slot"] = str(contract.get("missing_slot") or "").strip()
+    seeds = contract.get("query_seed_candidates", [])
+    if not isinstance(seeds, list):
+        seeds = [seeds] if str(seeds or "").strip() else []
+    base["query_seed_candidates"] = _dedupe_keep_order(
+        [str(seed).strip() for seed in seeds if str(seed).strip()]
+    )[:5]
+    base["evidence_boundary"] = str(contract.get("evidence_boundary") or "").strip()
     base["query_variant"] = str(contract.get("query_variant") or "").strip()
     base["novelty_requirement"] = str(contract.get("novelty_requirement") or "").strip()
     return base

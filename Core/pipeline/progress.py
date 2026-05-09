@@ -139,7 +139,16 @@ def execution_trace_signature(execution_trace: dict | None) -> str:
 def with_execution_trace_contract(execution_trace: dict | None, operation_contract: dict | None) -> dict[str, Any]:
     normalized_trace = normalize_execution_trace(execution_trace if isinstance(execution_trace, dict) else {})
     normalized_contract = normalize_operation_contract(operation_contract if isinstance(operation_contract, dict) else {})
-    for key in ("operation_kind", "target_scope", "query_variant", "novelty_requirement"):
+    for key in (
+        "operation_kind",
+        "target_scope",
+        "source_lane",
+        "search_subject",
+        "missing_slot",
+        "query_variant",
+        "novelty_requirement",
+        "evidence_boundary",
+    ):
         if normalized_contract.get(key):
             normalized_trace[key] = normalized_contract[key]
     return normalized_trace

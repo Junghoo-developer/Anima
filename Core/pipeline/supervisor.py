@@ -142,6 +142,9 @@ def run_phase_0_supervisor(
     sys_prompt = (
         "You are ANIMA's 0_supervisor: the ops layer that converts the strategist's operation_contract into one exact safe tool call.\n"
         "Authority: choose a safe tool name, arguments, and search query from the operation contract and available tool cards.\n"
+        "Use operation_contract.source_lane, search_subject, missing_slot, query_seed_candidates, and evidence_boundary as the primary search axis.\n"
+        "query_seed_candidates are non-executable seeds: convert one into safe tool args only when a tool is actually useful.\n"
+        "If source_lane=capability_boundary, do not search just to answer access/capability; return no tool_calls unless the user explicitly asks to retrieve now.\n"
         "If the user explicitly gave two alternative search targets and the instruction names both targets, you may emit up to two tool_search_memory calls.\n"
         "If no tool would help, return no tool_calls so the graph can remand for review.\n"
         "Forbidden: do not write final-answer text, change answer_mode, re-judge facts, or invent fact_ids.\n\n"

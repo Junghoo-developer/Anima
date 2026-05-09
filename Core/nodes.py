@@ -4610,38 +4610,55 @@ def _derive_operation_contract(
     required_tool = str(normalized_action_plan.get("required_tool") or "").strip()
     query_variant = _tool_query_from_instruction(required_tool) if required_tool else ""
     target_scope = ""
+    source_lane = ""
+    search_subject = ""
+    missing_slot = ""
+    query_seed_candidates = []
+    evidence_boundary = ""
     novelty_requirement = "If this pass repeats the same tool or source, change the focus or target scope."
     del user_input
 
     if "tool_read_artifact" in required_tool:
         operation_kind = "read_same_source_deeper"
         target_scope = "artifact_review"
+        source_lane = "artifact"
     elif "tool_scroll_chat_log" in required_tool:
         operation_kind = "read_same_source_deeper"
         target_scope = "anchored_chat_log_scroll"
+        source_lane = "songryeon_chat"
         novelty_requirement = "Use ToolCarryoverState's source id as the time-axis origin and read a different neighborhood than the previous pass."
     elif "tool_read_full_diary" in required_tool:
         operation_kind = "review_personal_history"
         target_scope = "past_self_history"
+        source_lane = "diary"
     elif "tool_search_memory" in required_tool or "tool_search_field_memos" in required_tool:
         operation_kind = "search_new_source"
         target_scope = "memory_search"
+        source_lane = "memory"
     elif "tool_scan_db_schema" in required_tool:
         operation_kind = "search_new_source"
         target_scope = "database_schema"
+        source_lane = "db_schema"
     elif _has_meaningful_strategy(response_strategy):
         operation_kind = "deliver_now"
         target_scope = "direct_answer"
+        source_lane = "none"
         novelty_requirement = "Do not bounce the user back with the same generic safety line."
     elif str((analysis_data or {}).get("investigation_status") or "").upper() == "COMPLETED":
         operation_kind = "deliver_now"
         target_scope = "grounded_delivery"
+        source_lane = "none"
     else:
         operation_kind = "unspecified"
 
     return _normalize_operation_contract({
         "operation_kind": operation_kind,
         "target_scope": target_scope,
+        "source_lane": source_lane,
+        "search_subject": search_subject,
+        "missing_slot": missing_slot,
+        "query_seed_candidates": query_seed_candidates,
+        "evidence_boundary": evidence_boundary,
         "query_variant": query_variant,
         "novelty_requirement": novelty_requirement if operation_kind != "unspecified" else "",
     })
@@ -5243,6 +5260,22 @@ def _base_fallback_strategist_output(
     )
 
     if needs_tool_operation:
+        goal_core = str(goal_lock.get("user_goal_core") or "").strip()
+        seed_candidates = _dedupe_keep_order(
+            [
+                goal_core,
+                *missing,
+                str(handoff.get("goal_state") or "").strip(),
+            ]
+        )[:4]
+        if question_class == "requesting_memory_recall":
+            source_lane = "memory"
+            target_scope = "private_memory_recall"
+            evidence_boundary = "Use private memory indexes only; phase 0 chooses the concrete memory search tool and args."
+        else:
+            source_lane = "mixed_private_sources"
+            target_scope = "memory_or_source_search"
+            evidence_boundary = "Use only source lanes allowed by tool cards; do not answer from unverified search assumptions."
         action_plan = {
             "current_step_goal": "Ask phase 0 to convert the operation contract into one safe tool call.",
             "required_tool": "",
@@ -5253,9 +5286,14 @@ def _base_fallback_strategist_output(
             ],
             "operation_contract": {
                 "operation_kind": "search_new_source",
-                "target_scope": "memory_or_source_search",
+                "target_scope": target_scope,
+                "source_lane": source_lane,
+                "search_subject": goal_core,
+                "missing_slot": "; ".join(missing[:3]),
+                "query_seed_candidates": seed_candidates,
+                "evidence_boundary": evidence_boundary,
                 "query_variant": "",
-                "novelty_requirement": "Phase 0 must choose an exact query from the current operation contract, not from raw user wording.",
+                "novelty_requirement": "Phase 0 must choose exact tool args from operation_contract seeds and boundaries, not from raw user wording.",
             },
         }
     else:
