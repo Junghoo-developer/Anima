@@ -1,9 +1,6 @@
 *[한국어](ANIMA_ARCHITECTURE_MAP.md) | [English](ANIMA_ARCHITECTURE_MAP.en.md)*
 
-# ANIMA Architecture Map (LIVE STATUS — 영문 본문)
-
-> 본 문서는 Codex 작업 로그 (LIVE STATUS) 라서 영문 본문 그대로 유지. 한국어 번역은 정후 별도 결재 시 박음. State_Opt와 동일 처분.
-> 갱신: 코드 이동 / 삭제 / 패키지 경계 변경 후 Codex가 갱신. 헌법 V4 §1-A 통과 (2026-05-09) 시점 #74/#75 박힘.
+# ANIMA Architecture Map
 
 > Document status: LIVE STATUS.
 > Constitution V3 ratified by Junghoo (2026-05-01). V4 §1-A and §2 ratified (2026-05-09).
