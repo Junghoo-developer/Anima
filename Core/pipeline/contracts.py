@@ -258,15 +258,18 @@ class SThinkingPacket(BaseModel):
 class ThinkingHandoff(BaseModel):
     schema_version: Literal["ThinkingHandoff.v1"] = Field(default="ThinkingHandoff.v1", alias="schema")
     producer: Literal["-1s"] = Field(default="-1s", description="The node that produced this handoff.")
-    recipient: Literal["-1a", "phase_3", "phase_119"] = Field(
+    recipient: Literal["-1a", "phase_3", "phase_119", "warroom_deliberator", "2b_thought_critic"] = Field(
         default="-1a",
-        description="The next recipient selected by -1s.",
+        description="The next recipient selected by -1s. Includes thought-recursion routes (warroom/thought_critic) when -1s second-call decides depth.",
     )
-    goal_state: str = Field(default="", description="Compact normalized goal state.")
+    goal_state: str = Field(
+        default="",
+        description="Compact normalized refinement of user intent (NOT the operational goal). Operational goal is owned by -1a's strategist_goal.user_goal_core. V4 §1-A.0 / §2 (k).",
+    )
     evidence_state: str = Field(default="", description="Compact current evidence state.")
     what_we_know: List[str] = Field(default_factory=list, description="Known facts available to the next node.")
     what_is_missing: List[str] = Field(default_factory=list, description="Missing facts or slots that still matter.")
-    next_node: Literal["-1a", "phase_3", "phase_119"] = Field(
+    next_node: Literal["-1a", "phase_3", "phase_119", "warroom_deliberator", "2b_thought_critic"] = Field(
         default="-1a",
         description="Graph node target selected by -1s.",
     )
@@ -274,6 +277,58 @@ class ThinkingHandoff(BaseModel):
     constraints_for_next_node: List[str] = Field(
         default_factory=list,
         description="Boundaries the next node must respect.",
+    )
+
+
+# --- 2b thought_critic mode (V4 §1-A.3, CR1) ----------------------------------
+
+class CritiqueItem(BaseModel):
+    """Single critique entry produced by 2b thought_critic mode (V4 §1-A.3)."""
+
+    issue: str = Field(default="", description="One-sentence description of the problem detected.")
+    evidence_refs: List[str] = Field(
+        default_factory=list,
+        description="fact_id citations from reasoning_board.fact_cells (V4 §2 (d): no fact_id invention).",
+    )
+    severity: Literal["minor", "warning", "blocker"] = Field(
+        default="warning",
+        description="How seriously the second -1s call should treat this critique.",
+    )
+
+
+class ThoughtCritique(BaseModel):
+    """Output schema for 2b thought_critic mode (V4 §1-A.3, CR1).
+
+    Produced when ``_strategist_needs_thought_recursion`` gate passes
+    (has_goal AND fact_cells == 0 AND no_tool_needed). The critique becomes
+    the input differentiator for the second -1s call (V4 §1-A.13 anchor).
+    """
+
+    schema_version: Literal["ThoughtCritique.v1"] = Field(default="ThoughtCritique.v1", alias="schema")
+    producer: Literal["2b_thought_critic"] = Field(default="2b_thought_critic")
+    hallucination_risks: List[CritiqueItem] = Field(
+        default_factory=list,
+        description="Claims in the thought flow that lack supporting evidence in fact_cells / recent_context / working_memory.",
+    )
+    logic_gaps: List[CritiqueItem] = Field(
+        default_factory=list,
+        description="Missing reasoning steps between the situation and the proposed handoff.",
+    )
+    memory_omissions: List[CritiqueItem] = Field(
+        default_factory=list,
+        description="Recent_context / working_memory items the thought flow ignored.",
+    )
+    persona_errors: List[CritiqueItem] = Field(
+        default_factory=list,
+        description="Person/perspective confusion (e.g., '그 친구' = '나' mismatch) detected in the thought flow.",
+    )
+    delta: str = Field(
+        default="",
+        description="Compact 1-2 sentence summary the second -1s call should read first.",
+    )
+    evidence_refs: List[str] = Field(
+        default_factory=list,
+        description="Top-level fact_id citations summarizing the critique. Subset of items' evidence_refs.",
     )
 
 

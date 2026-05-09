@@ -56,6 +56,7 @@ class AnimaState(TypedDict):
     search_results: str
     raw_read_report: Dict[str, Any]
     analysis_report: Dict[str, Any]
+    prior_thought_critique: Dict[str, Any]
     rescue_handoff_packet: Dict[str, Any]
     phase3_delivery_packet: Dict[str, Any]
     delivery_review: Dict[str, Any]
@@ -117,6 +118,7 @@ ANIMA_STATE_DEFAULTS: Dict[str, Any] = {
     "search_results": "",
     "raw_read_report": {},
     "analysis_report": {},
+    "prior_thought_critique": {},
     "rescue_handoff_packet": {},
     "phase3_delivery_packet": {},
     "delivery_review": {},
@@ -155,6 +157,7 @@ TURN_LIVED_FIELDS = {
     "start_gate_switches",
     "s_thinking_packet",
     "s_thinking_history",
+    "prior_thought_critique",
     "ops_decision",
     "critic_lens_packet",
     "strategist_objection_packet",

@@ -1203,3 +1203,45 @@ Recent thin-controller cleanup:
     (294 → 307 OK). Realizes the V4 §1-A.13 trio-recursion anchor in code.
     Parallel-eligible with T1 / B9 / B10 / C0.8/0.9/0.10. TR1 (1-turn verify of
     F4 fix on the 정후 무한 핑퐁 trace case) recommended pre-CR1.
+76. **V4 Phase 1 #CR1 — 2b thought_critic mode + -1s thought recursion + deterministic gate** (Hybrid initial draft, 2026-05-09).
+    Realizes the V4 §1-A.13 trio-recursion anchor in code. Claude authored the
+    initial draft for Junghoo to paste through Codex for second-pass review.
+    Changes:
+    - `Core/pipeline/contracts.py`: `ThinkingHandoff` `recipient` and `next_node`
+      Literal extended with `warroom_deliberator` and `2b_thought_critic`. New
+      `ThoughtCritique` (v1) and `CritiqueItem` schemas codify thought-critic
+      output (hallucination_risks / logic_gaps / memory_omissions / persona_errors
+      + delta + evidence_refs). `goal_state` description codifies V4 §1-A.0
+      meaning (user-intent normalization, NOT operational goal).
+    - `Core/graph.py`: New helper `_strategist_needs_thought_recursion(state)`
+      = `has_goal AND fact_cells == 0 AND no_tool_needed` (delivery_readiness
+      dependency removed per V4 §1-A.0 — gemma4 false-negative defense).
+      `route_after_strategist` adds the gate branch → `2b_thought_critic`.
+      `route_after_s_thinking` adds `warroom_deliberator` and `2b_thought_critic`
+      branches (with hard_stop priority preserved). New `2b_thought_critic`
+      node registered with recursion edge `2b_thought_critic → -1s_start_gate`.
+    - `Core/pipeline/thought_critic.py` (new module): `run_2b_thought_critic_node`
+      entry point + compactors. Auto-switches mode by input (B-2.4 (다)):
+      `fact_cells > 0` → integrated critique; `== 0` → memory-based critique.
+      LLM failure falls back to empty critique. `phase_2b_thought_critic`
+      graph wrapper imports `llm` and `build_thought_critic_prompt` lazily.
+    - `Core/prompt_builders.py`: New `build_thought_critic_prompt` system
+      prompt with explicit authority (critique only) and prohibitions
+      (no tool calls / no answer text / no fact_id invention / no fact
+      re-judgment outside what's in hand).
+    - `Core/nodes.py`: `_llm_start_gate_turn_contract` accepts new
+      `prior_thought_critique` argument; second-call recursion rule (Step 1
+      verify-first / Step 2 routing) appended when the critique is present;
+      new V4 §1-A.0 / §2 (k) rule 9 codifies "-1s does not perform goal-setting".
+    - `Core/pipeline/start_gate.py`: Call site propagates
+      `state["prior_thought_critique"]` with backward-compatible TypeError
+      cascade (works against pre-CR1 callsite signatures).
+    - `Core/state.py`: `prior_thought_critique` registered in `AnimaState`,
+      `ANIMA_STATE_DEFAULTS`, and `TURN_LIVED_FIELDS`.
+    - 13 new tests (under `tests/`, gitignored locally per Junghoo's
+      2026-05-09 decision): `test_strategist_needs_thought_recursion_gate.py`
+      (4 cases), `test_thought_recursion_routing.py` (5 cases),
+      `test_2b_thought_critic.py` (4 cases). Local pytest run:
+      **307 OK** (294 baseline + 13 new, no regression).
+    Status: Hybrid first draft. Awaiting Codex paste + Junghoo final review
+    before §1-C (trio recursion) drafting.

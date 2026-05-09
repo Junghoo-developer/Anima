@@ -286,9 +286,15 @@ def run_phase_minus_1s_start_gate(
             incoming_s_thinking_history,
             analysis_report=state.get("analysis_report", {}),
             tactical_briefing=state.get("tactical_briefing", ""),
+            prior_thought_critique=state.get("prior_thought_critique"),
         )
     except TypeError as exc:
-        if "analysis_report" not in str(exc) and "tactical_briefing" not in str(exc):
+        msg = str(exc)
+        if (
+            "analysis_report" not in msg
+            and "tactical_briefing" not in msg
+            and "prior_thought_critique" not in msg
+        ):
             raise
         try:
             start_gate_turn_contract = llm_start_gate_turn_contract(
@@ -298,17 +304,31 @@ def run_phase_minus_1s_start_gate(
                 reasoning_plan,
                 incoming_s_thinking_history,
                 analysis_report=state.get("analysis_report", {}),
+                tactical_briefing=state.get("tactical_briefing", ""),
             )
-        except TypeError as inner_exc:
-            if "analysis_report" not in str(inner_exc):
+        except TypeError as mid_exc:
+            mid_msg = str(mid_exc)
+            if "analysis_report" not in mid_msg and "tactical_briefing" not in mid_msg:
                 raise
-            start_gate_turn_contract = llm_start_gate_turn_contract(
-                user_input,
-                recent_context,
-                working_memory,
-                reasoning_plan,
-                incoming_s_thinking_history,
-            )
+            try:
+                start_gate_turn_contract = llm_start_gate_turn_contract(
+                    user_input,
+                    recent_context,
+                    working_memory,
+                    reasoning_plan,
+                    incoming_s_thinking_history,
+                    analysis_report=state.get("analysis_report", {}),
+                )
+            except TypeError as inner_exc:
+                if "analysis_report" not in str(inner_exc):
+                    raise
+                start_gate_turn_contract = llm_start_gate_turn_contract(
+                    user_input,
+                    recent_context,
+                    working_memory,
+                    reasoning_plan,
+                    incoming_s_thinking_history,
+                )
     start_gate_switches = build_start_gate_switches(
         user_input,
         recent_context,

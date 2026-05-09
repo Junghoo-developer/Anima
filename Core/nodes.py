@@ -2622,6 +2622,7 @@ def _llm_start_gate_turn_contract(
     s_thinking_history: dict | None = None,
     analysis_report: dict | None = None,
     tactical_briefing: str = "",
+    prior_thought_critique: dict | None = None,
 ):
     del working_memory
     text = str(user_input or "").strip()
@@ -2656,7 +2657,14 @@ def _llm_start_gate_turn_contract(
     tactical_text = str(tactical_briefing or "").strip()
     if tactical_text:
         tactical_prompt = "\n\n[tactical_briefing]\n" + _compact_user_facing_summary(tactical_text, 700)
-    system_prompt = (
+    critique_prompt = ""
+    has_prior_critique = isinstance(prior_thought_critique, dict) and bool(prior_thought_critique)
+    if has_prior_critique:
+        critique_prompt = (
+            "\n\n[prior_thought_critique]\n"
+            + json.dumps(prior_thought_critique, ensure_ascii=False, separators=(",", ":"))
+        )
+    base_rules = (
         "You are ANIMA -1s. Produce only a thin start-gate contract.\n"
         "Rules:\n"
         "1. Decide the current turn meaning from current_user_turn, recent context, and s_thinking_history; do not use isolated keywords.\n"
@@ -2666,8 +2674,22 @@ def _llm_start_gate_turn_contract(
         "5. If the user asks to remember, retrieve, verify, search, or report a concrete past stored fact, choose requesting_memory_recall and grounded_recall. Example: '내 일기에서 X를 찾아봐.'\n"
         "6. If the user asks about public media or general knowledge, choose public_knowledge_question and public_parametric_knowledge.\n"
         "7. normalized_goal must be abstract; do not choose tools, write search queries, or write final answer text.\n"
-        "8. If tactical_briefing contains active DreamHint advisories, treat them as advisory context only: do not let them override the current turn, propose tool calls, or copy briefing text into the contract goal."
+        "8. If tactical_briefing contains active DreamHint advisories, treat them as advisory context only: do not let them override the current turn, propose tool calls, or copy briefing text into the contract goal.\n"
+        "9. (V4 §1-A.0 / §2 (k)) Do not perform goal-setting. -1s normalizes user intent only; the operational goal is owned by -1a's strategist_goal.user_goal_core.\n"
     )
+    recursion_rule = ""
+    if has_prior_critique:
+        recursion_rule = (
+            "10. RECURSION MODE — prior_thought_critique is present. Run TWO steps in order:\n"
+            "    Step 1 (verification, MUST run first):\n"
+            "      Re-read working_memory + recent_context + s_thinking_history with the critique in mind.\n"
+            "      Ask: 'Given this critique, is the evidence really thin, or did the previous step miss something?'\n"
+            "      If verified evidence is sufficient → set normalized_goal to direct_delivery and let downstream route to phase_3.\n"
+            "    Step 2 (recursion routing — only if Step 1 confirms shortage):\n"
+            "      If deep deliberation is needed → signal warroom via routing context.\n"
+            "      If a lightweight follow-up is enough → still prefer phase_3 over re-looping; do not loop the critique itself.\n"
+        )
+    system_prompt = base_rules + recursion_rule
     human_prompt = (
         f"[current_user_turn]\n{text}\n\n"
         f"[recent_context_excerpt]\n{_compact_user_facing_summary(recent_context, 900)}\n\n"
@@ -2675,6 +2697,7 @@ def _llm_start_gate_turn_contract(
         f"[s_thinking_history]\n{history_prompt}\n\n"
         f"[reasoning_plan_hint]\n{json.dumps(reasoning_plan if isinstance(reasoning_plan, dict) else {}, ensure_ascii=False)}"
         f"{analysis_prompt}"
+        f"{critique_prompt}"
     )
     try:
         structured_llm = llm.with_structured_output(StartGateTurnContract)

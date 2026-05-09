@@ -18,6 +18,7 @@ from .nodes import (
     phase_minus_1s_start_gate,
     phase_warroom_deliberator,
 )
+from .pipeline.thought_critic import phase_2b_thought_critic
 from .speaker_guards import phase_3_validator_with_speaker_guard
 from .readiness import normalize_readiness_decision
 from .state import AnimaState
@@ -111,6 +112,47 @@ def _has_delivery_strategy_material(response_strategy: dict) -> bool:
     return False
 
 
+def _strategist_needs_thought_recursion(state: AnimaState) -> bool:
+    """Detect deterministic gate for 2b_thought_critic recursion.
+
+    V4 §1-A.3 (CR1) gate conditions, all AND:
+      - has_goal: ``strategist_goal.user_goal_core`` is set (-1a fallback also sets it)
+      - no_facts: ``reasoning_board.fact_cells`` is empty (B-2.2 (가) — truly empty case only)
+      - no_tool_needed: ``action_plan.required_tool`` empty AND no executable tool_request
+
+    The gate intentionally **does not** depend on ``delivery_readiness`` because
+    that field is an LLM-emitted label (see V4 §1-A.0 — gemma4 false-negative
+    concern). Only deterministic data carries the gate; LLM judgment runs in
+    the second -1s call after the critique result becomes its input
+    differentiator.
+    """
+    strategist_output = state.get("strategist_output", {})
+    if not isinstance(strategist_output, dict):
+        return False
+
+    strategist_goal = strategist_output.get("strategist_goal", {})
+    if not isinstance(strategist_goal, dict):
+        strategist_goal = {}
+    has_goal = bool(str(strategist_goal.get("user_goal_core") or "").strip())
+
+    reasoning_board = state.get("reasoning_board", {})
+    if not isinstance(reasoning_board, dict):
+        reasoning_board = {}
+    fact_cells = reasoning_board.get("fact_cells", [])
+    no_facts = isinstance(fact_cells, list) and len(fact_cells) == 0
+
+    action_plan = strategist_output.get("action_plan", {})
+    if not isinstance(action_plan, dict):
+        action_plan = {}
+    required_tool = str(action_plan.get("required_tool") or "").strip()
+    no_tool_needed = (
+        not required_tool
+        and not _executable_tool_request(strategist_output)
+    )
+
+    return has_goal and no_facts and no_tool_needed
+
+
 def _strategist_no_tool_delivery_ready(state: AnimaState) -> bool:
     strategist_output = state.get("strategist_output", {})
     if not isinstance(strategist_output, dict):
@@ -175,6 +217,18 @@ def route_after_s_thinking(state: AnimaState):
             return "phase_119"
         _log("[System] -1s requests -1a planning.")
         return "-1a_thinker"
+    if next_node in {"warroom_deliberator", "warroom"}:
+        if _graph_hard_stop_exceeded(state):
+            _log("[System] -1s planning budget exhausted; routing to phase_119.")
+            return "phase_119"
+        _log("[System] -1s requests warroom deliberation.")
+        return "warroom_deliberator"
+    if next_node in {"2b_thought_critic", "thought_critic"}:
+        if _graph_hard_stop_exceeded(state):
+            _log("[System] -1s planning budget exhausted; routing to phase_119.")
+            return "phase_119"
+        _log("[System] -1s requests another thought critique.")
+        return "2b_thought_critic"
 
     # Compatibility fallback for malformed or older start-gate packets while
     # the live path uses ThinkingHandoff.v1 top-level next_node.
@@ -194,6 +248,9 @@ def route_after_strategist(state: AnimaState):
     if _strategist_no_tool_delivery_ready(state):
         _log("[System] -1a supplied a no-tool delivery contract; routing to phase_3.")
         return "phase_3"
+    if _strategist_needs_thought_recursion(state):
+        _log("[System] -1a fallback with no facts; routing to 2b_thought_critic.")
+        return "2b_thought_critic"
     _log("[System] -1a asks phase 0 to select the concrete tool operation.")
     return "0_supervisor"
 
@@ -347,6 +404,7 @@ workflow.add_node("phase_3", phase_3_validator_with_speaker_guard)
 workflow.add_node("delivery_review", phase_delivery_review)
 workflow.add_node("phase_119", phase_119_rescue)
 workflow.add_node("warroom_deliberator", phase_warroom_deliberator)
+workflow.add_node("2b_thought_critic", phase_2b_thought_critic)
 
 workflow.add_edge(START, "-1s_start_gate")
 workflow.add_conditional_edges(
@@ -356,6 +414,8 @@ workflow.add_conditional_edges(
         "phase_3": "phase_3",
         "phase_119": "phase_119",
         "-1a_thinker": "-1a_thinker",
+        "warroom_deliberator": "warroom_deliberator",
+        "2b_thought_critic": "2b_thought_critic",
     },
 )
 workflow.add_conditional_edges(
@@ -365,6 +425,7 @@ workflow.add_conditional_edges(
         "0_supervisor": "0_supervisor",
         "phase_3": "phase_3",
         "phase_119": "phase_119",
+        "2b_thought_critic": "2b_thought_critic",
     },
 )
 workflow.add_conditional_edges(
@@ -383,6 +444,7 @@ workflow.add_edge("phase_1", "phase_2a")
 workflow.add_edge("phase_2a", "phase_2")
 workflow.add_edge("phase_2", "-1s_start_gate")
 workflow.add_edge("warroom_deliberator", "-1s_start_gate")
+workflow.add_edge("2b_thought_critic", "-1s_start_gate")
 workflow.add_edge("phase_119", "phase_3")
 workflow.add_edge("phase_3", "delivery_review")
 workflow.add_conditional_edges(

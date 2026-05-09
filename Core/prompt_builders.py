@@ -281,6 +281,57 @@ def build_phase_minus_1a_prompt(
     )
 
 
+def build_thought_critic_prompt(
+    *,
+    s_thinking_packet_compact: str,
+    recent_context_compact: str,
+    working_memory_compact: str,
+    fact_cells_compact: str,
+    mode: str = "memory_based",
+) -> str:
+    """System prompt for 2b in thought_critic mode (V4 §1-A.3, CR1).
+
+    Mode auto-switches by input (B-2.4 (다)):
+      - ``integrated`` — fact_cells > 0, compare facts + thought + memory
+      - ``memory_based`` — fact_cells == 0, compare thought + memory only
+    """
+    mode_brief = (
+        "Integrated critique mode: fact_cells are available — compare the "
+        "thought flow against verified facts AND recent_context/working_memory."
+        if mode == "integrated"
+        else
+        "Memory-based critique mode: fact_cells are EMPTY — compare the thought "
+        "flow only against recent_context + working_memory + s_thinking_packet."
+    )
+    return (
+        "You are ANIMA's 2b in thought_critic mode (V4 §1-A.3).\n"
+        "You are NOT verifying tool output here. You are critiquing -1s's own "
+        "thought flow against memory before -1s is called again.\n\n"
+        f"[mode]\n{mode_brief}\n\n"
+        f"[s_thinking_packet (current -1s thought)]\n{s_thinking_packet_compact}\n\n"
+        f"[recent_context]\n{recent_context_compact}\n\n"
+        f"[working_memory]\n{working_memory_compact}\n\n"
+        f"[fact_cells]\n{fact_cells_compact}\n\n"
+        "Detect and classify into the four buckets. Each item has issue + "
+        "evidence_refs (fact_id citations from reasoning_board.fact_cells; do "
+        "NOT invent fact_ids — V4 §2 (d)) + severity (minor/warning/blocker):\n"
+        "  - hallucination_risks: claims in the thought flow that lack support\n"
+        "    in fact_cells / recent_context / working_memory.\n"
+        "  - logic_gaps: missing reasoning steps between situation and handoff.\n"
+        "  - memory_omissions: recent_context / working_memory items the\n"
+        "    thought flow ignored or contradicted.\n"
+        "  - persona_errors: person/perspective confusion (e.g., '그 친구' vs\n"
+        "    user themselves) detected in the thought flow.\n\n"
+        "Also fill `delta` with a 1-2 sentence summary the second -1s call "
+        "should read first.\n\n"
+        "Authority (V4 §1-A.3 + V4 §2):\n"
+        "- ALLOWED: critique only; cite existing fact_ids; output ThoughtCritique.v1.\n"
+        "- FORBIDDEN: tool calls (V4 §2 (g)); answer text; routing decisions;\n"
+        "  fact_id invention (V4 §2 (d)); fact re-judgment outside what's in hand.\n"
+        "If nothing critical is found, return empty lists with delta='no critical issue detected'."
+    )
+
+
 def build_phase_2b_prompt(
     *,
     analysis_mode: str,
