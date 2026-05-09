@@ -1,3 +1,5 @@
+*[한국어](ANIMA_REFORM_IMPLEMENTATION_V1.md) | [English](ANIMA_REFORM_IMPLEMENTATION_V1.en.md)*
+
 # ANIMA Reform Implementation V1
 
 > Document status: BACKGROUND / PARTIALLY IMPLEMENTED.
