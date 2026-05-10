@@ -11,6 +11,8 @@ from typing import Any, Callable
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from .structured_io import invoke_structured_with_repair
+
 
 def run_phase_2a_reader(
     state: dict[str, Any],
@@ -90,13 +92,21 @@ def run_phase_2a_reader(
         "7. Do not fake source coverage for tool results that were not present.\n"
     )
 
-    structured_llm = llm_supervisor.with_structured_output(raw_read_report_schema)
-    try:
-        response_obj = structured_llm.invoke([
+    result = invoke_structured_with_repair(
+        llm=llm_supervisor,
+        schema=raw_read_report_schema,
+        messages=[
             SystemMessage(content=sys_prompt),
             HumanMessage(content="Read the provided raw source and produce a raw-read report."),
-        ])
-        raw_read_report = response_obj.model_dump()
+        ],
+        node_name="phase_2a_reader",
+        repair_prompt="Return valid RawReadReport JSON only. Do not judge the final answer.",
+        max_repairs=1,
+    )
+    try:
+        if not result.ok:
+            raise ValueError(result.failure.get("summary", "structured output failed"))
+        raw_read_report = result.value
         raw_items = raw_read_report.get("items", []) if isinstance(raw_read_report.get("items"), list) else []
         usable_items = [
             item
@@ -114,6 +124,8 @@ def run_phase_2a_reader(
     except Exception as exc:
         print_fn(f"[Phase 2a] structured output error: {exc}")
         raw_read_report = fallback_tool_grounded_raw_read_report(search_data)
+        if not result.ok:
+            raw_read_report["structured_failure"] = result.failure
 
     return {
         "raw_read_report": raw_read_report,

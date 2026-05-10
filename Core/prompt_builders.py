@@ -275,12 +275,12 @@ def build_phase_minus_1a_prompt(
         "4. response_strategy.must_include_facts may contain only fact_cells cited by fact_id or current-turn facts already admitted by answer_mode_policy.\n"
         "5. Do not re-judge facts. Fact judgment authority belongs to -1s/2b; cite fact_cells instead of relitigating them.\n"
         "6. Do not author tool calls. Phase 0 supervisor decides exact tool name, args, and queries from operation_contract.\n"
-        "7. F4.5: When evidence is missing, make operation_contract concrete enough for phase 0 without writing executable args: fill source_lane, search_subject, missing_slot, query_seed_candidates, and evidence_boundary.\n"
-        "8. query_seed_candidates are short topic/entity seeds only; never put raw full user_input, tool names, or serialized tool args there.\n"
+        "7. F4.7: When evidence is missing, make operation_contract concrete enough for phase 0 without writing executable args: fill source_lane, search_subject, missing_slot, query_seed_candidates, retrieval_key_candidates, source_title_candidates, and evidence_boundary.\n"
+        "8. search_subject may describe the evidence topic, but retrieval_key_candidates/source_title_candidates must carry compact executable anchors such as names, project titles, source titles, dates, ids, or quoted terms. Do not put current_step_goal-style task prose in seed fields.\n"
         "9. If the user asks about capability/access rather than requesting retrieval, set source_lane=capability_boundary and prefer delivery_readiness=deliver_now with a response_strategy.\n"
         "10. If no tool is needed, set delivery_readiness=deliver_now and leave action_plan.required_tool empty.\n"
         "11. If evidence is missing, describe one narrow operation_contract intent; keep response_strategy empty or minimal.\n"
-        "12. Do not pass the whole user sentence as a search query.\n"
+        "12. Do not pass the whole user sentence as a search query. Do not use current_step_goal as a query seed.\n"
     )
 
 
@@ -353,6 +353,11 @@ def build_phase_2b_prompt(
         "You are ANIMA's phase_2b critic and source prosecutor.\n"
         "Read the phase_2a report and produce a fact-first analysis report using only the grounded material in that packet.\n"
         "Do not paraphrase yourself into new facts. Do not confuse a recovered question surface with a filled answer slot.\n\n"
+        "Output contract:\n"
+        "- Return exactly an AnalysisReport-shaped structured packet.\n"
+        "- Required top-level keys include evidences, source_judgments, analytical_thought, situational_brief, and investigation_status.\n"
+        "- Do not output generic report keys such as analysis_summary, key_entities, answer, conclusion, or final_response.\n"
+        "- Keep analytical_thought and situational_brief short; the schema is a judge packet, not an essay.\n\n"
         f"[analysis_mode]\n{analysis_mode}\n\n"
         f"[user_input]\n{user_input}\n\n"
         f"[raw_read_report]\n{raw_read_packet}\n\n"

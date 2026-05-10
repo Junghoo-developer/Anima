@@ -19,6 +19,7 @@ from .packets import (
     compact_working_memory_for_prompt,
 )
 from .plans import normalize_strategist_goal, strategist_goal_from_goal_lock
+from .structured_io import invoke_structured_with_repair
 
 
 def _json_clone(value: Any):
@@ -300,10 +301,18 @@ def run_base_phase_minus_1a_thinker(
         evidence_ledger_packet=evidence_ledger_packet,
     )
 
-    structured_llm = llm.with_structured_output(strategist_reasoning_output_schema)
+    result = invoke_structured_with_repair(
+        llm=llm,
+        schema=strategist_reasoning_output_schema,
+        messages=[SystemMessage(content=sys_prompt)],
+        node_name="-1a_thinker",
+        repair_prompt="Return valid StrategistReasoningOutput JSON only. Do not route or author tool_request.",
+        max_repairs=1,
+    )
     try:
-        res = structured_llm.invoke([SystemMessage(content=sys_prompt)])
-        strategist_payload = res.model_dump()
+        if not result.ok:
+            raise ValueError(result.failure.get("summary", "structured output failed"))
+        strategist_payload = result.value
         strategist_payload["answer_mode_policy"] = answer_mode_policy
         response_strategy = strategist_payload.get("response_strategy", {})
         if not isinstance(response_strategy, dict):
@@ -339,6 +348,8 @@ def run_base_phase_minus_1a_thinker(
             start_gate_switches=projected_state.get("start_gate_switches", {}),
             tool_carryover=projected_state.get("tool_carryover", {}),
         )
+        if not result.ok:
+            strategist_payload["structured_failure"] = result.failure
         strategist_payload["answer_mode_policy"] = answer_mode_policy
         response_strategy = strategist_payload.get("response_strategy", {})
         if not isinstance(response_strategy, dict):

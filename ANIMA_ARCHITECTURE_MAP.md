@@ -83,8 +83,9 @@ Routing owner:
 - `route_after_delivery_review`: post-phase3 answer approval/remand/end
   decision.
 - `route_after_phase3`: compatibility shim only.
-- `route_audit_result_v2`: legacy compatibility fallback only. It is no longer
-  a live graph edge owner.
+- `route_audit_result`: retired compatibility shim. Malformed legacy audit
+  routes now fail closed to `phase_119`; no readiness/auditor compatibility
+  router owns a live graph edge.
 
 ## Field Loop Nodes
 
@@ -254,8 +255,8 @@ cycle packet/history and chooses delivery, planning, or 119.
 ### Compatibility Left Intentionally
 
 - `Core.readiness` remains as typed readiness-contract compatibility.
-- `Core.graph.route_audit_result_v2` remains for legacy tests and fallback
-  packets, but it is not a live graph owner in the normal V3 route.
+- `Core.graph.route_audit_result_v2` has been removed. `route_audit_result`
+  remains only as a fail-closed compatibility shim that returns `phase_119`.
 - `delivery_review` now calls the LLM reviewer first. The deterministic
   speaker guard remains as fallback and hard blocker for obvious internal-report
   leaks.
@@ -1258,3 +1259,120 @@ Recent thin-controller cleanup:
     search axis for loop comparison. New regression coverage:
     `test_operation_contract_f45.py` plus expanded supervisor prompt tests.
     Full tests: **314 OK**.
+78. **V4 Phase 1 #CR1.1 — thought-recursion gate respects F4.5 operation_contract**
+    completed (2026-05-09). The CR1 deterministic gate in
+    `_strategist_needs_thought_recursion` now treats F4/F4.5 evidence/read
+    operations as supervisor-needed even when legacy `required_tool` and
+    `tool_request` are empty. This prevents diary/date/private-memory retrieval
+    turns such as "read my 2023-11-23 diary" from being misclassified as
+    no-tool/no-fact thought recursion and looping through `2b_thought_critic`
+    or WarRoom before phase 0 can select the concrete search tool. New local
+    regression coverage asserts `search_new_source` and `review_personal_history`
+    contracts route to `0_supervisor` instead of the thought-critic recursion
+    lane.
+79. **V4 Phase 1 #CR1.2 — phase 0 diary-date operation fallback** completed
+    (2026-05-09). `run_phase_0_supervisor` now has a narrow deterministic
+    fallback for exact diary-date operation contracts before the LLM tool-call
+    path: when `operation_contract` asks for diary/personal-history retrieval
+    and the contract/user text contains an exact date (`YYYY-MM-DD`,
+    `YYYY M D`, or Korean `YYYY년 M월 D일`), phase 0 emits
+    `tool_read_full_diary(target_date="YYYY-MM-DD")`. The Neo4j adapter already
+    expands that canonical date to the stored spaced form (`YYYY M D`) through
+    `_alternate_date_id`, so this fixes the observed phase 0 parsing loop
+    without changing the DB address model. The legacy direct-instruction date
+    regex in `Core.nodes` was also repaired from a backspace character to a
+    real word-boundary regex.
+80. **V4 Phase 1 #CR1.3 — phase 2b structured-output fallback preserves raw reads**
+    completed (2026-05-09). When the phase 2b structured `AnalysisReport`
+    parser fails after phase 2a has already completed a `full_raw_review`,
+    `run_phase_2_analyzer` now builds a cautious fallback analysis from
+    `raw_read_report.items` instead of discarding the read and returning empty
+    evidences. Preserved raw observations become `evidences`,
+    `source_judgments.accepted_facts`, and reasoning-board `fact_cells`; the
+    fallback marks the investigation `COMPLETED` only when usable phase 2a
+    observations exist, otherwise it remains `INCOMPLETE`. This prevents exact
+    diary reads from looping back into the same tool call solely because the
+    LLM returned malformed structured output such as a bare year integer.
+81. **V4 Phase 1 #SO1 — structured-output runtime hardening** completed
+    (2026-05-09). `Core.pipeline.structured_io` now provides a shared graph
+    boundary layer for structured LLM packets: bounded repair retry,
+    `StructuredFailure.v1`, Pydantic dump normalization, `ThinkingHandoff`
+    shape validation, `ThoughtCritique` / `DeliveryReview` fact-id allowlist
+    validation, 0_supervisor tool-name validation, and WarRoom typed-output
+    validation. The wrapper is applied to -1s, -1a, 2a, 2b fact mode, 2b
+    thought mode, WarRoom, and delivery review. WarRoom structured-output
+    failure is now sealed as `war_room.structured_failure` and
+    `war_room_output.structured_failure` with an `INSUFFICIENT` status instead
+    of passing free-text/fallback answer seeds across the graph boundary.
+    `Orders/V4_Phase_1/SO1_structured_output_inventory.md` records the
+    structured-output call-site inventory and provider-native strict-mode note.
+    New regression coverage verifies repair retry, invented fact-id filtering,
+    invalid supervisor tool rejection, WarRoom free-text failure sealing, and
+    ThinkingHandoff shape repair.
+82. **V4 Phase 1 #C0.8/#C0.9 — legacy readiness route retired** completed
+    (2026-05-09). `Core.graph.route_audit_result_v2` was removed, and the
+    remaining `route_audit_result` compatibility shim now fails closed to
+    `phase_119` instead of interpreting old pre-delivery auditor/readiness
+    packets. `route_after_s_thinking` no longer falls back through legacy
+    readiness/auditor routing when a malformed or older `s_thinking_packet`
+    lacks a valid V4 `next_node`; it routes to `phase_119` as a structured
+    boundary failure. `Core.readiness` remains as a typed delivery/rescue
+    helper because phase3 payloads, delivery contracts, and rescue packets
+    still consume `ReadinessDecision.v1` as compatibility data, but readiness
+    no longer owns graph routing. The old readiness routing test file was
+    removed and replaced with a fail-closed route assertion.
+83. **V4 Phase 1 #F4.6 — operation_contract payload hardening** completed
+    (2026-05-09). Thin-case fallback planning now derives executable
+    `operation_contract.search_subject` from the normalized start-gate contract
+    surface instead of treating `UserGoalContract` as `GoalLock`; the fallback
+    also filters internal evidence-state sentinel strings out of
+    `query_seed_candidates` and `missing_slot`. `ThinkingHandoff.what_is_missing`
+    no longer carries the internal status sentence "stored or external evidence
+    has not been read yet"; that state stays in `evidence_state` and execution
+    constraints. `Core.pipeline.structured_io` now validates operation-contract
+    payload quality, and `0_supervisor` blocks empty/status-only search
+    contracts with `operation_contract_payload_invalid` before any tool call
+    can run, while exact diary-date contracts still use the deterministic
+    `tool_read_full_diary` path. Neo4j memory search now checks optional chunk
+    schema metadata and skips the `HAS_CHUNK` vector query when the live DB lacks
+    chunk relationships/properties, falling back to raw PastRecord vector and
+    lexical search without schema-warning spam. New regression coverage:
+    `tests/test_operation_contract_payload_hardening.py` plus Neo4j Record-shape
+    schema probing coverage. Full tests: **333 OK**.
+84. **V4 Phase 1 #N0 — midnight-government runtime audit** recorded
+    (2026-05-10). `python -m Core.midnight` was verified to complete with
+    `recent_unprocessed_count=0` and `future_decision=approve`, but the audit
+    classifies this as a dry-run heartbeat rather than production night
+    learning: the CLI calls `run_night()` with `persist=False`,
+    `graph_session=None`, and `include_semantic=False`, while no-input nights
+    still flow through `seconddream::dry-run` and can reach future approval.
+    The report `Orders/V4_Phase_1/N0_midnight_government_audit_2026_05_10.md`
+    records the doc/code mismatch and recommends N1/N2 follow-ups for honest
+    CLI status and idle/no-op handling before production persist mode.
+85. **V4 Phase 1 #N1/#N2 — midnight CLI honest status + idle no-op guard**
+    completed (2026-05-10). `run_night()` now returns explicit runtime metadata
+    (`mode`, `night_action`, `persisted`, `semantic_enabled`) and short-circuits
+    no-input nights structurally when `recent.unprocessed_count == 0` and no
+    `EmptySecondDream` candidates exist. The default CLI no longer lets the
+    dry-run fallback flow through `seconddream::dry-run` to a misleading
+    `future_decision=approve`; it reports
+    `night_action=idle_no_unprocessed_dreams`, `persisted=false`,
+    `semantic=false`, and `future_decision=no_op`. Existing R7 production
+    integration remains unchanged for real Dream rows with `persist=True`.
+    Regression check: **336 OK**.
+86. **V4 Phase 1 #F4.7/#SO1.1 — retrieval seed contract + 2b root unwrap**
+    completed (2026-05-10). `OperationContract` now separates broad
+    `search_subject` prose from executable retrieval anchors through
+    `retrieval_key_candidates` and `source_title_candidates`, alongside legacy
+    `query_seed_candidates`. The -1a prompt requires compact anchors such as
+    names, project titles, source titles, dates, ids, or quoted terms in those
+    seed fields and forbids `current_step_goal`-style task prose as a seed.
+    Phase 0 now prefers dedicated retrieval/title/query seeds over broad
+    `search_subject` text when building memory-search args, preventing an LLM
+    tool call from executing a strategist goal sentence when a compact anchor is
+    present. Separately, the shared structured-output guard now unwraps a
+    single schema-named root packet such as `{"analysis_report": {...}}` before
+    Pydantic validation, so phase 2b can recover from the observed nested
+    `AnalysisReport` shape without falling into answer-shaped report drift.
+    This remains a structural contract hardening pass, not raw user-intent
+    classification. Regression check: **338 OK**.

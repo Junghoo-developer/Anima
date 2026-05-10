@@ -12,6 +12,78 @@ from typing import Any, Callable
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from .structured_io import invoke_structured_with_repair
+
+
+def _fallback_analysis_from_raw_read_report(raw_read_report: dict[str, Any]) -> dict[str, Any]:
+    """Preserve phase 2a observations when structured 2b output fails."""
+    raw_read_report = raw_read_report if isinstance(raw_read_report, dict) else {}
+    raw_items = raw_read_report.get("items", [])
+    if not isinstance(raw_items, list):
+        raw_items = []
+
+    evidences: list[dict[str, str]] = []
+    source_judgments: list[dict[str, Any]] = []
+    for idx, item in enumerate(raw_items, start=1):
+        if not isinstance(item, dict):
+            continue
+        observed_fact = str(item.get("observed_fact") or item.get("excerpt") or "").strip()
+        if not observed_fact:
+            continue
+        source_id = str(item.get("source_id") or "").strip() or f"raw_item_{idx}"
+        source_type = str(item.get("source_type") or "").strip() or "raw_source"
+        evidences.append(
+            {
+                "source_id": source_id,
+                "source_type": source_type,
+                "extracted_fact": observed_fact,
+            }
+        )
+        source_judgments.append(
+            {
+                "source_id": source_id,
+                "source_type": source_type,
+                "source_status": "ambiguous",
+                "accepted_facts": [observed_fact],
+                "contested_facts": [],
+                "objection_reason": "Structured phase_2b output failed; this fact is preserved from phase_2a raw observation and still needs cautious delivery.",
+                "missing_info": [],
+                "search_needed": False,
+            }
+        )
+
+    if not evidences:
+        return {
+            "evidences": [],
+            "source_judgments": [],
+            "analytical_thought": "Structured output failed and phase_2a provided no usable raw observations.",
+            "situational_brief": "Phase_2b fallback found no raw observations to preserve.",
+            "investigation_status": "INCOMPLETE",
+            "can_answer_user_goal": False,
+            "contract_status": "missing_slot",
+            "missing_slots": ["usable raw observations"],
+            "filled_slots": {},
+            "unfilled_slots": ["usable raw observations"],
+            "rejected_sources": [],
+        }
+
+    source_summary = str(raw_read_report.get("source_summary") or "").strip()
+    return {
+        "evidences": evidences,
+        "source_judgments": source_judgments,
+        "analytical_thought": (
+            "Structured output failed, so phase_2b preserved phase_2a raw observations as cautious grounded facts."
+        ),
+        "situational_brief": source_summary or f"Phase_2b fallback preserved {len(evidences)} raw observations.",
+        "investigation_status": "COMPLETED",
+        "can_answer_user_goal": True,
+        "contract_status": "satisfied",
+        "missing_slots": [],
+        "filled_slots": {"raw_observations": len(evidences)},
+        "unfilled_slots": [],
+        "rejected_sources": [],
+    }
+
 
 def run_phase_2_analyzer(
     state: dict[str, Any],
@@ -88,13 +160,27 @@ def run_phase_2_analyzer(
         evidence_ledger_packet=evidence_ledger_packet,
     )
 
-    structured_llm = llm.with_structured_output(analysis_report_schema)
-    try:
-        response_obj = structured_llm.invoke([
+    result = invoke_structured_with_repair(
+        llm=llm,
+        schema=analysis_report_schema,
+        messages=[
             SystemMessage(content=sys_prompt),
-            HumanMessage(content=state["user_input"]),
-        ])
-        analysis_dict = normalize_analysis_with_source_relay(response_obj.model_dump(), source_relay_packet)
+            HumanMessage(content="Return the AnalysisReport structured packet for the raw-read report above. Do not answer the user."),
+        ],
+        node_name="phase_2b_fact_judge",
+        repair_prompt=(
+            "Return valid AnalysisReport JSON only. Use keys from the schema, including "
+            "evidences, source_judgments, analytical_thought, situational_brief, "
+            "investigation_status, can_answer_user_goal, contract_status, missing_slots, "
+            "filled_slots, and unfilled_slots. Do not return analysis_summary, key_entities, "
+            "a bare date, number, or final answer."
+        ),
+        max_repairs=2,
+    )
+    try:
+        if not result.ok:
+            raise ValueError(result.failure.get("summary", "structured output failed"))
+        analysis_dict = normalize_analysis_with_source_relay(result.value, source_relay_packet)
         analysis_dict = enforce_field_memo_judgments(analysis_dict, raw_read_report, state["user_input"])
         reasoning_board = build_reasoning_board_from_analysis(state, analysis_dict)
         status = analysis_dict.get("investigation_status", "UNKNOWN")
@@ -103,16 +189,12 @@ def run_phase_2_analyzer(
         fake_ai_message = AIMessage(content=json.dumps(analysis_dict, ensure_ascii=False))
     except Exception as exc:
         print_fn(f"[Phase 2b] structured output error: {exc}")
-        analysis_dict = {
-            "evidences": [],
-            "source_judgments": [],
-            "analytical_thought": "Structured output failed, so phase_2b used a minimal fallback analysis.",
-            "situational_brief": "Phase_2b fallback was used because structured output failed.",
-            "investigation_status": "INCOMPLETE",
-        }
+        analysis_dict = _fallback_analysis_from_raw_read_report(raw_read_report)
+        if not result.ok:
+            analysis_dict["structured_failure"] = result.failure
         analysis_dict = enforce_field_memo_judgments(analysis_dict, raw_read_report, state["user_input"])
         reasoning_board = build_reasoning_board_from_analysis(state, analysis_dict)
-        fake_ai_message = AIMessage(content="phase_2_fallback_seed")
+        fake_ai_message = AIMessage(content=json.dumps(analysis_dict, ensure_ascii=False))
 
     war_room = war_room_from_critic(state, analysis_dict, raw_read_report)
     result = {

@@ -30,6 +30,7 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, List, Optional
 
 from .contracts import ThoughtCritique
+from .structured_io import invoke_structured_with_repair, validate_thought_critique
 
 
 def _empty_critique() -> Dict[str, Any]:
@@ -148,20 +149,27 @@ def run_2b_thought_critic_node(
         mode=mode,
     )
 
-    critique_dict: Dict[str, Any]
-    try:
-        structured_llm = llm.with_structured_output(ThoughtCritique)
-        critique_obj = structured_llm.invoke(sys_prompt)
-        if isinstance(critique_obj, ThoughtCritique):
-            critique_dict = critique_obj.model_dump(by_alias=True)
-        elif isinstance(critique_obj, dict):
-            critique_dict = ThoughtCritique(**critique_obj).model_dump(by_alias=True)
-        else:
-            print_fn("  [Phase 2b/thought_critic] LLM returned non-schema output; using empty critique.")
-            critique_dict = _empty_critique()
-    except Exception as exc:  # pragma: no cover - LLM runtime error path
-        print_fn(f"  [Phase 2b/thought_critic] LLM call failed ({exc!r}); using empty critique.")
+    result = invoke_structured_with_repair(
+        llm=llm,
+        schema=ThoughtCritique,
+        messages=sys_prompt,
+        node_name="2b_thought_critic",
+        repair_prompt="Return valid ThoughtCritique.v1 JSON only. Do not invent fact_ids.",
+        max_repairs=1,
+    )
+    if result.ok:
+        critique_dict = result.value
+    else:
+        print_fn(f"  [Phase 2b/thought_critic] structured output failed; using empty critique. {result.failure.get('summary', '')}")
         critique_dict = _empty_critique()
+        critique_dict["structured_failure"] = result.failure
+
+    allowed_fact_ids = [
+        str(cell.get("fact_id") or "").strip()
+        for cell in fact_cells
+        if isinstance(cell, dict) and str(cell.get("fact_id") or "").strip()
+    ] if isinstance(fact_cells, list) else []
+    critique_dict = validate_thought_critique(critique_dict, allowed_fact_ids)
 
     return {"prior_thought_critique": critique_dict}
 

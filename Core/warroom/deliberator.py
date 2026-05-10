@@ -3,6 +3,7 @@ import json
 from langchain_core.messages import AIMessage, SystemMessage
 
 from Core.evidence_ledger import evidence_ledger_for_prompt
+from Core.pipeline.structured_io import invoke_structured_with_repair, validate_warroom_output
 
 from .contracts import WarRoomDeliberationOutput
 from .state import (
@@ -90,15 +91,34 @@ def run_phase_warroom_deliberator(
         "5. If judge_rejection_reason exists, do not repeat the rejected seed; attach current user details/emotion directly.\n"
     )
 
-    try:
-        structured_llm = llm.with_structured_output(WarRoomDeliberationOutput)
-        output = structured_llm.invoke([SystemMessage(content=prompt)])
-        war_room_output = output.model_dump()
-    except Exception as e:
-        print(f"[WarRoom] structured output error: {e}")
-        war_room_output = fallback_war_room_output(user_input, operation_plan, response_strategy, war_room_contract, recent_context)
+    structured_failure = {}
+    result = invoke_structured_with_repair(
+        llm=llm,
+        schema=WarRoomDeliberationOutput,
+        messages=[SystemMessage(content=prompt)],
+        node_name="warroom_deliberator",
+        repair_prompt="Return valid WarRoomDeliberationOutput JSON only. Do not write a final answer outside the schema.",
+        max_repairs=1,
+    )
+    if result.ok:
+        war_room_output, structured_failure = validate_warroom_output(result.value)
+    else:
+        structured_failure = result.failure
+        war_room_output = {}
 
-    if not war_room_output_is_usable(war_room_output):
+    if structured_failure:
+        print(f"[WarRoom] structured output error: {structured_failure.get('summary', '')}")
+        war_room_output = {
+            "deliberation_status": "INSUFFICIENT",
+            "reasoning_summary": "WarRoom structured output failed; no free-text output is allowed to cross the graph boundary.",
+            "usable_answer_seed": "",
+            "duty_checklist": [],
+            "missing_items": ["structured_warroom_output"],
+            "confidence": 0.0,
+            "structured_failure": structured_failure,
+        }
+        response_strategy["direct_answer_seed"] = ""
+    elif not war_room_output_is_usable(war_room_output):
         fallback = fallback_war_room_output(user_input, operation_plan, response_strategy, war_room_contract, recent_context)
         if not str(war_room_output.get("usable_answer_seed") or "").strip():
             war_room_output = fallback
@@ -135,6 +155,8 @@ def run_phase_warroom_deliberator(
         "why_no_tool": str(war_room_contract.get("reason", {}).get("why_tool_is_not_primary") or ""),
         "allowed_output_boundary": str(war_room_contract.get("phase3_handoff", {}).get("allowed_output_boundary") or ""),
     })
+    if structured_failure:
+        war_room["structured_failure"] = structured_failure
     result = {
         "war_room_output": war_room_output,
         "response_strategy": response_strategy,

@@ -20,7 +20,6 @@ from .nodes import (
 )
 from .pipeline.thought_critic import phase_2b_thought_critic
 from .speaker_guards import phase_3_validator_with_speaker_guard
-from .readiness import normalize_readiness_decision
 from .state import AnimaState
 
 
@@ -32,7 +31,9 @@ def _log(message: str, fallback: str | None = None):
 
 
 def route_audit_result(state: AnimaState):
-    return route_audit_result_v2(state)
+    del state
+    _log("[System] Legacy audit route is retired; routing to phase_119.")
+    return "phase_119"
 
 
 def route_after_supervisor(state: AnimaState):
@@ -90,6 +91,30 @@ def _executable_tool_request(strategist_output: dict) -> dict:
     return {}
 
 
+def _operation_contract_needs_supervisor(action_plan: dict) -> bool:
+    """Return True when F4/F4.5 operation intent still needs phase 0 execution."""
+    if not isinstance(action_plan, dict):
+        return False
+    operation_contract = action_plan.get("operation_contract", {})
+    if not isinstance(operation_contract, dict):
+        return False
+
+    operation_kind = str(operation_contract.get("operation_kind") or "").strip()
+    source_lane = str(operation_contract.get("source_lane") or "").strip()
+    if operation_kind in {"", "unspecified", "deliver_now"}:
+        return False
+    if source_lane == "capability_boundary":
+        return False
+    return operation_kind in {
+        "search_new_source",
+        "read_same_source_deeper",
+        "review_personal_history",
+        "extract_feature_summary",
+        "compare_with_user_goal",
+        "review_recent_dialogue",
+    }
+
+
 def _has_delivery_strategy_material(response_strategy: dict) -> bool:
     if not isinstance(response_strategy, dict) or not response_strategy:
         return False
@@ -119,6 +144,7 @@ def _strategist_needs_thought_recursion(state: AnimaState) -> bool:
       - has_goal: ``strategist_goal.user_goal_core`` is set (-1a fallback also sets it)
       - no_facts: ``reasoning_board.fact_cells`` is empty (B-2.2 (가) — truly empty case only)
       - no_tool_needed: ``action_plan.required_tool`` empty AND no executable tool_request
+        AND no F4/F4.5 operation_contract evidence/read operation
 
     The gate intentionally **does not** depend on ``delivery_readiness`` because
     that field is an LLM-emitted label (see V4 §1-A.0 — gemma4 false-negative
@@ -148,6 +174,7 @@ def _strategist_needs_thought_recursion(state: AnimaState) -> bool:
     no_tool_needed = (
         not required_tool
         and not _executable_tool_request(strategist_output)
+        and not _operation_contract_needs_supervisor(action_plan)
     )
 
     return has_goal and no_facts and no_tool_needed
@@ -230,9 +257,8 @@ def route_after_s_thinking(state: AnimaState):
         _log("[System] -1s requests another thought critique.")
         return "2b_thought_critic"
 
-    # Compatibility fallback for malformed or older start-gate packets while
-    # the live path uses ThinkingHandoff.v1 top-level next_node.
-    return route_audit_result_v2(state)
+    _log("[System] -1s produced no valid V4 next_node; routing to phase_119.")
+    return "phase_119"
 
 
 def route_after_strategist(state: AnimaState):
@@ -299,96 +325,6 @@ def route_after_delivery_review(state: AnimaState):
     if should_remand:
         return "phase_119"
     return END
-
-
-def route_audit_result_v2(state: AnimaState):
-    decision = state.get("auditor_decision", {})
-    action = str(decision.get("action") or "").strip()
-    instruction = str(state.get("auditor_instruction", "") or "").strip()
-    reasoning_board = state.get("reasoning_board", {})
-    verdict = reasoning_board.get("verdict_board", {}) if isinstance(reasoning_board, dict) else {}
-    verdict_answer_now = bool(verdict.get("answer_now")) if isinstance(verdict, dict) else False
-    try:
-        reasoning_budget = max(int(state.get("reasoning_budget", 1)), 0)
-    except (TypeError, ValueError):
-        reasoning_budget = 1
-    hard_stop = max(reasoning_budget, 1) + 2
-    readiness = normalize_readiness_decision(
-        decision.get("readiness_decision", {}) if isinstance(decision, dict) else state.get("readiness_decision", {})
-    )
-    readiness_status = str(readiness.get("status") or "").strip()
-    readiness_next_hop = str(readiness.get("allowed_next_hop") or "").strip()
-
-    if readiness_status in {"ready_for_direct_answer", "ready_with_current_turn_facts", "ready_with_identity_context"}:
-        _log("[System] Readiness allows phase_3 delivery.")
-        return "phase_3"
-    if readiness_status == "clean_failure":
-        if readiness_next_hop == "phase_119":
-            _log("[System] Readiness requests phase_119 clean failure preparation.")
-            return "phase_119"
-        _log("[System] Readiness requests a clean phase_3 failure boundary.")
-        return "phase_3"
-    if readiness_status == "needs_warroom":
-        _log("[System] Readiness requests WarRoom deliberation.")
-        return "warroom_deliberator"
-    if readiness_status in {"needs_memory_recall", "needs_tool_evidence"}:
-        _log("[System] Readiness requests supervised tool evidence.")
-        return "0_supervisor"
-    if readiness_status == "needs_context_repair":
-        _log("[System] Readiness requests direct context repair in phase_3.")
-        return "phase_3"
-    if readiness_status == "needs_planning":
-        if state.get("loop_count", 0) >= hard_stop:
-            _log("[System] Readiness planning attempts exceeded the limit; routing to phase_119.")
-            return "phase_119"
-        if readiness_next_hop == "phase_2a":
-            _log("[System] Readiness requests another read/planning pass.")
-            return "phase_2a"
-        _log("[System] Readiness requests a revised -1a strategy plan.")
-        return "-1a_thinker"
-
-    if action == "phase_3":
-        _log("[System] -1b passed the turn to phase_3.")
-        return "phase_3"
-    if action in {"answer_not_ready", "clean_failure"}:
-        _log("[System] -1b requested a clean failure boundary in phase_3.")
-        return "phase_3"
-    if action == "phase_119":
-        _log("[System] -1b requested phase_119.")
-        return "phase_119"
-    if action == "warroom_deliberation":
-        _log("[System] -1b requested WarRoom deliberation.")
-        return "warroom_deliberator"
-    if action in {"internal_reasoning", "plan_more", "plan_with_strategist"} and state.get("loop_count", 0) >= hard_stop:
-        _log("[System] Planning retries exceeded the limit; routing to phase_119.")
-        return "phase_119"
-    if action == "internal_reasoning":
-        _log("[System] -1b requested internal critic-advocate reasoning.")
-        return "phase_2a"
-    if action == "plan_more":
-        _log("[System] -1b requested another read/planning pass.")
-        return "phase_2a"
-    if action == "plan_with_strategist":
-        _log("[System] -1b requested a revised -1a strategy plan.")
-        return "-1a_thinker"
-    if action == "call_tool":
-        _log("[System] -1b rejected and routed to 0_supervisor.")
-        return "0_supervisor"
-
-    if instruction in {"tool_pass_to_phase_3", "tool_pass_to_phase_3()"}:
-        return "phase_3"
-    if instruction in {"tool_call_119_rescue", "tool_call_119_rescue()"}:
-        return "phase_119"
-    if verdict_answer_now:
-        _log("[System] Verdict board allows phase_3.")
-        return "phase_3"
-
-    if state.get("loop_count", 0) >= hard_stop:
-        _log("[System] Auditor retries exceeded; routing to phase_119.")
-        return "phase_119"
-
-    _log("[System] -1b rejected and routed to 0_supervisor.")
-    return "0_supervisor"
 
 
 _log("ANIMA graph assembly starting...")

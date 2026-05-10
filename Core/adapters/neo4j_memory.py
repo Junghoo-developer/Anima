@@ -204,6 +204,63 @@ def _default_embedding_provider(keyword: str) -> dict[str, list[float]]:
     return query_vectors
 
 
+def _record_value(row, key: str):
+    if isinstance(row, dict):
+        return row.get(key)
+    if hasattr(row, "get"):
+        try:
+            return row.get(key)
+        except Exception:
+            pass
+    try:
+        return row[key]
+    except Exception:
+        return None
+
+
+def _schema_list_result(result, key: str) -> list[str] | None:
+    try:
+        if hasattr(result, "single"):
+            row = result.single()
+            if row is not None:
+                values = _record_value(row, key)
+                if isinstance(values, (list, tuple)):
+                    return [str(value or "").strip() for value in values if str(value or "").strip()]
+    except Exception:
+        return None
+    rows = _result_data(result)
+    if not rows:
+        return None
+    first = rows[0]
+    values = _record_value(first, key)
+    if isinstance(values, (list, tuple)):
+        return [str(value or "").strip() for value in (values or []) if str(value or "").strip()]
+    return None
+
+
+def _chunk_schema_available(session) -> bool:
+    """Return whether the optional chunk schema is present.
+
+    Unknown metadata support defaults to True for compatibility; explicit
+    absence of HAS_CHUNK/text/chunk_index disables the chunk query so Neo4j does
+    not emit schema warnings in databases that have not migrated chunks yet.
+    """
+    try:
+        rels = _schema_list_result(
+            session.run("CALL db.relationshipTypes() YIELD relationshipType RETURN collect(relationshipType) AS rels"),
+            "rels",
+        )
+        props = _schema_list_result(
+            session.run("CALL db.propertyKeys() YIELD propertyKey RETURN collect(propertyKey) AS props"),
+            "props",
+        )
+    except Exception:
+        return True
+    if rels is None or props is None:
+        return True
+    return "HAS_CHUNK" in set(rels) and {"text", "chunk_index"}.issubset(set(props))
+
+
 def search_memory(
     keyword: str,
     *,
@@ -229,7 +286,8 @@ def search_memory(
 
     try:
         with session_factory() as session:
-            if "mxbai-embed-large" in query_vectors:
+            use_chunk_query = _chunk_schema_available(session)
+            if "mxbai-embed-large" in query_vectors and use_chunk_query:
                 try:
                     chunk_hits = _result_data(
                         session.run(

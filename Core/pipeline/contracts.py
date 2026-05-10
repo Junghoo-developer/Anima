@@ -536,6 +536,14 @@ class OperationContract(BaseModel):
         default_factory=list,
         description="Short seed phrases phase 0 may transform into exact tool args. No raw full user sentence.",
     )
+    retrieval_key_candidates: List[str] = Field(
+        default_factory=list,
+        description="Exact named entities, project names, titles, dates, ids, or other compact retrieval keys. Prefer these over search_subject for tool args.",
+    )
+    source_title_candidates: List[str] = Field(
+        default_factory=list,
+        description="Known or suspected document/source titles to search for or read. Prefer these over narrative goal descriptions.",
+    )
     evidence_boundary: str = Field(
         default="",
         description="Boundary for which source types are allowed or forbidden in this operation.",

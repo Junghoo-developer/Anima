@@ -11,6 +11,10 @@ if __name__ == "__main__":
         json.dumps(
             {
                 "status": packet.get("status"),
+                "mode": packet.get("mode"),
+                "night_action": packet.get("night_action"),
+                "persisted": bool(packet.get("persisted")),
+                "semantic": bool(packet.get("semantic_enabled")),
                 "recent_unprocessed_count": packet.get("recent", {}).get("unprocessed_count"),
                 "future_decision": packet.get("future", {}).get("decision", {}).get("decision"),
             },

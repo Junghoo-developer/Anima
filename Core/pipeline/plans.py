@@ -39,6 +39,8 @@ def empty_operation_contract():
         "search_subject": "",
         "missing_slot": "",
         "query_seed_candidates": [],
+        "retrieval_key_candidates": [],
+        "source_title_candidates": [],
         "evidence_boundary": "",
         "query_variant": "",
         "novelty_requirement": "",
@@ -308,6 +310,18 @@ def normalize_operation_contract(contract: dict | None):
         seeds = [seeds] if str(seeds or "").strip() else []
     base["query_seed_candidates"] = _dedupe_keep_order(
         [str(seed).strip() for seed in seeds if str(seed).strip()]
+    )[:5]
+    retrieval_keys = contract.get("retrieval_key_candidates", [])
+    if not isinstance(retrieval_keys, list):
+        retrieval_keys = [retrieval_keys] if str(retrieval_keys or "").strip() else []
+    base["retrieval_key_candidates"] = _dedupe_keep_order(
+        [str(seed).strip() for seed in retrieval_keys if str(seed).strip()]
+    )[:5]
+    source_titles = contract.get("source_title_candidates", [])
+    if not isinstance(source_titles, list):
+        source_titles = [source_titles] if str(source_titles or "").strip() else []
+    base["source_title_candidates"] = _dedupe_keep_order(
+        [str(seed).strip() for seed in source_titles if str(seed).strip()]
     )[:5]
     base["evidence_boundary"] = str(contract.get("evidence_boundary") or "").strip()
     base["query_variant"] = str(contract.get("query_variant") or "").strip()

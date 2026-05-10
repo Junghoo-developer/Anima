@@ -115,6 +115,10 @@ from .pipeline.plans import (
     strategist_answer_mode_target_from_policy as _strategist_answer_mode_target_from_policy,
     strategist_goal_from_goal_lock as _strategist_goal_from_goal_lock,
 )
+from .pipeline.structured_io import (
+    clean_operation_contract_seed_candidates as _clean_operation_contract_seed_candidates,
+    is_internal_operation_contract_seed as _is_internal_operation_contract_seed,
+)
 from .pipeline.delivery import run_phase_3_validator as _run_phase_3_validator
 from .pipeline.delivery_contracts import (
     build_phase3_speaker_judge_contract as _build_phase3_speaker_judge_contract_impl,
@@ -2674,8 +2678,10 @@ def _llm_start_gate_turn_contract(
         "1. Decide the current turn meaning from current_user_turn, recent context, and s_thinking_history; do not use isolated keywords.\n"
         "2. Use s_thinking_history to avoid repeating the same broad direction or main_gap when prior cycles stalled.\n"
         "3. If the user shares a present-turn memory/story/fact, choose providing_current_memory and current_turn_grounding.\n"
+        "   This includes correction/teaching turns where the user says to remember a fact they are providing now.\n"
+        "   Example: 'remember this: my name is X and your name is Y' is current-turn grounding, not stored-memory retrieval.\n"
         "4. If the user asks whether you can access/search/use/read/see a source, memory, diary, or database, choose capability_boundary_question and generic_dialogue. Korean examples: '내 일기를 볼 수 있어?', 'DB 검색 가능해?', '기억에 접근할 수 있어?' This asks about capability, not retrieval.\n"
-        "5. If the user asks to remember, retrieve, verify, search, or report a concrete past stored fact, choose requesting_memory_recall and grounded_recall. Example: '내 일기에서 X를 찾아봐.'\n"
+        "5. If the user asks to remember, retrieve, verify, search, or report a concrete past stored fact that is NOT supplied in the current turn, choose requesting_memory_recall and grounded_recall. Example: '내 일기에서 X를 찾아봐.'\n"
         "6. If the user asks about public media or general knowledge, choose public_knowledge_question and public_parametric_knowledge.\n"
         "7. normalized_goal must be abstract; do not choose tools, write search queries, or write final answer text.\n"
         "8. If tactical_briefing contains active DreamHint advisories, treat them as advisory context only: do not let them override the current turn, propose tool calls, or copy briefing text into the contract goal.\n"
@@ -2705,12 +2711,22 @@ def _llm_start_gate_turn_contract(
         f"{critique_prompt}"
     )
     try:
-        structured_llm = llm.with_structured_output(StartGateTurnContract)
-        parsed = structured_llm.invoke([
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=human_prompt),
-        ])
-        payload = _safe_model_dump(parsed)
+        from .pipeline.structured_io import invoke_structured_with_repair
+
+        result = invoke_structured_with_repair(
+            llm=llm,
+            schema=StartGateTurnContract,
+            messages=[
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=human_prompt),
+            ],
+            node_name="-1s_start_gate",
+            repair_prompt="Return valid StartGateTurnContract JSON only. Do not write tools, queries, goals, or final answers.",
+            max_repairs=1,
+        )
+        if not result.ok:
+            raise ValueError(result.failure.get("summary", "structured output failed"))
+        payload = result.value
         payload["contract_source"] = "llm_start_gate"
         return _normalize_start_gate_turn_contract(payload, text, recent_context)
     except Exception as exc:
@@ -4241,12 +4257,17 @@ def _normalize_suggested_instruction(suggestion: str):
     if artifact_hint:
         return f'tool_read_artifact(artifact_hint={json.dumps(artifact_hint, ensure_ascii=False)})'
 
-    date_match = re.search(r"(\d{4}-\d{2}-\d{2})", suggestion)
+    date_match = re.search(r"\b(\d{4})-(\d{2})-(\d{2})\b", suggestion)
+    spaced_date_match = re.search(r"\b(\d{4})\s+(\d{1,2})\s+(\d{1,2})\b", suggestion)
     lowered = suggestion.lower()
+    iso_date = "-".join(date_match.groups()) if date_match else ""
     if date_match and any(token in suggestion for token in ["\uc77c\uae30", "diary"]):
-        return f'tool_read_full_diary(target_date="{date_match.group(1)}")'
+        return f'tool_read_full_diary(target_date="{iso_date}")'
+    if spaced_date_match and any(token in suggestion for token in ["\uc77c\uae30", "diary"]):
+        year, month, day = spaced_date_match.groups()
+        return f'tool_read_full_diary(target_date="{int(year):04d}-{int(month):02d}-{int(day):02d}")'
     if date_match and any(token in lowered for token in ["\ub300\ud654", "\ucc44\ud305", "chat", "log"]):
-        return f'tool_scroll_chat_log(target_id="{date_match.group(1)}", direction="both", limit=15)'
+        return f'tool_scroll_chat_log(target_id="{iso_date}", direction="both", limit=15)'
     if any(token in lowered for token in ["schema", "db"]) or any(token in suggestion for token in ["\uc2a4\ud0a4\ub9c8", "\ub370\uc774\ud130\ubca0\uc774\uc2a4"]):
         return 'tool_scan_db_schema(dummy_keyword="database schema")'
 
@@ -4614,6 +4635,8 @@ def _derive_operation_contract(
     search_subject = ""
     missing_slot = ""
     query_seed_candidates = []
+    retrieval_key_candidates = []
+    source_title_candidates = []
     evidence_boundary = ""
     novelty_requirement = "If this pass repeats the same tool or source, change the focus or target scope."
     del user_input
@@ -4658,6 +4681,8 @@ def _derive_operation_contract(
         "search_subject": search_subject,
         "missing_slot": missing_slot,
         "query_seed_candidates": query_seed_candidates,
+        "retrieval_key_candidates": retrieval_key_candidates,
+        "source_title_candidates": source_title_candidates,
         "evidence_boundary": evidence_boundary,
         "query_variant": query_variant,
         "novelty_requirement": novelty_requirement if operation_kind != "unspecified" else "",
@@ -5182,6 +5207,60 @@ def _looks_like_current_turn_memory_story_share(user_input: str) -> bool:
     return bool((has_story_signal and has_personal_signal) or (len(text) >= 45 and has_personal_signal))
 
 
+def _goal_core_from_start_gate_contracts(
+    *,
+    user_input: str,
+    start_gate_switches: dict | None,
+    handoff: dict | None,
+) -> tuple[dict, dict]:
+    switches = start_gate_switches if isinstance(start_gate_switches, dict) else {}
+    handoff = handoff if isinstance(handoff, dict) else {}
+
+    candidates: list[tuple[str, str]] = []
+    for key in ("strategist_goal", "goal_lock"):
+        packet = switches.get(key, {})
+        if isinstance(packet, dict):
+            candidates.append((key, str(packet.get("user_goal_core") or "").strip()))
+
+    goal_contract = switches.get("goal_contract", {})
+    if isinstance(goal_contract, dict):
+        candidates.append(("goal_contract.user_goal_core", str(goal_contract.get("user_goal_core") or "").strip()))
+        candidates.append(("goal_contract.user_goal", str(goal_contract.get("user_goal") or "").strip()))
+
+    turn_contract = switches.get("start_gate_turn_contract", {})
+    if isinstance(turn_contract, dict):
+        candidates.append(("turn_contract.normalized_goal", str(turn_contract.get("normalized_goal") or "").strip()))
+    candidates.append(("start_gate.normalized_goal", str(switches.get("normalized_goal") or "").strip()))
+    candidates.append(("handoff.goal_state", str(handoff.get("goal_state") or "").strip()))
+
+    derived_goal_lock = _derive_goal_lock_v2(user_input, {})
+    candidates.append(("derived_goal_lock", str(derived_goal_lock.get("user_goal_core") or "").strip()))
+
+    goal_core = ""
+    source = ""
+    for source_name, candidate in candidates:
+        text = str(candidate or "").strip()
+        if not text:
+            continue
+        if _is_internal_operation_contract_seed(text):
+            continue
+        if _raw_user_wording_leaked(text, user_input):
+            continue
+        goal_core = text
+        source = source_name
+        break
+
+    goal_lock = _normalize_goal_lock(derived_goal_lock)
+    if goal_core:
+        goal_lock["user_goal_core"] = goal_core
+    return goal_lock, {
+        "goal_core": goal_core,
+        "goal_core_source": source,
+        "goal_contract": goal_contract if isinstance(goal_contract, dict) else {},
+        "turn_contract": turn_contract if isinstance(turn_contract, dict) else {},
+    }
+
+
 def _base_fallback_strategist_output(
     user_input: str,
     s_thinking_packet: dict | None,
@@ -5209,7 +5288,7 @@ def _base_fallback_strategist_output(
     missing = [
         str(item or "").strip()
         for item in handoff.get("what_is_missing", []) or []
-        if str(item or "").strip()
+        if str(item or "").strip() and not _is_internal_operation_contract_seed(item)
     ][:8]
     synthetic_case = {
         "investigation_status": "COMPLETED" if facts else ("INCOMPLETE" if missing else ""),
@@ -5235,8 +5314,13 @@ def _base_fallback_strategist_output(
         or "The case still needs a clearer operating theory before delivery."
     )
     start_gate_switches = start_gate_switches if isinstance(start_gate_switches, dict) else {}
-    start_gate_goal_contract = start_gate_switches.get("goal_contract", {})
-    goal_lock = start_gate_goal_contract if isinstance(start_gate_goal_contract, dict) and start_gate_goal_contract else _derive_goal_lock_v2(user_input, {})
+    goal_lock, goal_source = _goal_core_from_start_gate_contracts(
+        user_input=user_input,
+        start_gate_switches=start_gate_switches,
+        handoff=handoff,
+    )
+    goal_contract = goal_source.get("goal_contract", {})
+    turn_contract = goal_source.get("turn_contract", {})
     answer_mode_policy = start_gate_switches.get("answer_mode_policy", {})
     if not isinstance(answer_mode_policy, dict) or not answer_mode_policy:
         answer_mode_policy = _answer_mode_policy_for_turn(user_input, recent_context, goal_lock)
@@ -5260,10 +5344,14 @@ def _base_fallback_strategist_output(
     )
 
     if needs_tool_operation:
-        goal_core = str(goal_lock.get("user_goal_core") or "").strip()
-        seed_candidates = _dedupe_keep_order(
+        goal_core = str(goal_source.get("goal_core") or goal_lock.get("user_goal_core") or "").strip()
+        slot_to_fill = str(goal_contract.get("slot_to_fill") or "").strip() if isinstance(goal_contract, dict) else ""
+        normalized_goal = str(turn_contract.get("normalized_goal") or start_gate_switches.get("normalized_goal") or "").strip()
+        seed_candidates = _clean_operation_contract_seed_candidates(
             [
                 goal_core,
+                slot_to_fill,
+                normalized_goal,
                 *missing,
                 str(handoff.get("goal_state") or "").strip(),
             ]
@@ -5289,8 +5377,10 @@ def _base_fallback_strategist_output(
                 "target_scope": target_scope,
                 "source_lane": source_lane,
                 "search_subject": goal_core,
-                "missing_slot": "; ".join(missing[:3]),
+                "missing_slot": "; ".join(_clean_operation_contract_seed_candidates([slot_to_fill, *missing], limit=3)),
                 "query_seed_candidates": seed_candidates,
+                "retrieval_key_candidates": [],
+                "source_title_candidates": [],
                 "evidence_boundary": evidence_boundary,
                 "query_variant": "",
                 "novelty_requirement": "Phase 0 must choose exact tool args from operation_contract seeds and boundaries, not from raw user wording.",
@@ -5349,6 +5439,10 @@ def _base_fallback_strategist_output(
             working_memory,
         ),
         "goal_lock": goal_lock,
+        "strategist_goal": _strategist_goal_from_goal_lock(
+            goal_lock,
+            answer_mode_target=_strategist_answer_mode_target_from_policy(answer_mode_policy),
+        ),
         "convergence_state": "deliverable" if deliverable_now else "gathering",
         "achieved_findings": _grounded_findings_from_analysis(synthetic_case),
         "delivery_readiness": "deliver_now" if deliverable_now else ("need_one_more_source" if needs_tool_operation else "need_reframe"),
@@ -6486,6 +6580,13 @@ def _supervisor_search_queries(user_input: str, tool_name: str, tool_args: dict,
     query_variant = str(normalized_contract.get("query_variant") or "").strip()
     if query_variant and not _looks_like_fake_tool_or_meta_string(query_variant):
         queries.insert(0, query_variant)
+    for key in ("query_seed_candidates", "source_title_candidates", "retrieval_key_candidates"):
+        values = normalized_contract.get(key, [])
+        if isinstance(values, list):
+            for value in reversed(values[:5]):
+                seed = str(value or "").strip()
+                if seed and not _looks_like_fake_tool_or_meta_string(seed):
+                    queries.insert(0, seed)
     return _dedupe_keep_order([query for query in queries if query])[:2]
 
 
@@ -6501,6 +6602,25 @@ def _build_supervisor_tool_message(tool_name: str, tool_args: dict, user_input: 
             exact_query = str(normalized_tool_args.get(other_arg_name) or "").strip()
 
         if exact_query:
+            normalized_contract = _normalize_operation_contract(operation_contract if isinstance(operation_contract, dict) else {})
+            dedicated_seeds = _dedupe_keep_order(
+                [
+                    str(seed or "").strip()
+                    for key in ("retrieval_key_candidates", "source_title_candidates", "query_seed_candidates")
+                    for seed in (
+                        normalized_contract.get(key, [])
+                        if isinstance(normalized_contract.get(key, []), list)
+                        else []
+                    )
+                    if str(seed or "").strip()
+                ]
+            )
+            contract_subjects = {
+                str(normalized_contract.get("search_subject") or "").strip(),
+                str(normalized_contract.get("missing_slot") or "").strip(),
+            }
+            if dedicated_seeds and exact_query in contract_subjects:
+                exact_query = dedicated_seeds[0]
             exact_args = dict(normalized_tool_args)
             exact_args[arg_name] = exact_query
             if normalized_tool_name == "tool_search_field_memos":

@@ -37,6 +37,23 @@ def _fallback_empty_seconddream() -> dict[str, Any]:
     )
 
 
+def _idle_future_packet(*, source_persona: str, branch_path: str = "TimeBranch/future") -> dict[str, Any]:
+    return {
+        "witness": {},
+        "critic": {},
+        "decision": {
+            "role": "future_decision_maker",
+            "status": "idle",
+            "decision": "no_op",
+            "reason": "no_unprocessed_day_memory",
+            "source_persona": str(source_persona or "").strip(),
+            "branch_path": str(branch_path or "TimeBranch/future"),
+            "next_node": "",
+        },
+        "persisted_dreamhint": None,
+    }
+
+
 def run_night(
     *,
     unprocessed_dreams: list[Mapping[str, Any]] | None = None,
@@ -68,6 +85,25 @@ def run_night(
         source_persona=source_persona,
     )
     empty_candidates = list(recent_packet.get("empty_seconddreams", []) or [])
+    recent_unprocessed_count = int(recent_packet.get("unprocessed_count", 0) or 0)
+    is_idle_no_input = recent_unprocessed_count == 0 and not empty_candidates
+    if is_idle_no_input:
+        return {
+            "status": "completed",
+            "mode": "production" if persist else "dry_run",
+            "night_action": "idle_no_unprocessed_dreams",
+            "persisted": False,
+            "semantic_enabled": bool(include_semantic),
+            "recent": recent_packet,
+            "present": None,
+            "persisted_seconddream": None,
+            "past": None,
+            "persisted_change_proposal": None,
+            "persisted_election": None,
+            "future": _idle_future_packet(source_persona=source_persona),
+            "semantic": None,
+            "graph_operations_log": [],
+        }
     empty_seconddream = empty_candidates[0] if empty_candidates else _fallback_empty_seconddream()
     formatter_output = dict(recent_packet.get("formatter_output") or {})
     auditor_output = dict(recent_packet.get("auditor_output") or {})
@@ -164,6 +200,16 @@ def run_night(
         )
     return {
         "status": "completed",
+        "mode": "production" if persist else "dry_run",
+        "night_action": "processed_day_memory",
+        "persisted": bool(
+            persisted_seconddream
+            or persisted_change_proposal
+            or persisted_election
+            or (future or {}).get("persisted_dreamhint")
+            or (semantic or {}).get("graph_operations_log")
+        ),
+        "semantic_enabled": bool(include_semantic),
         "recent": recent_packet,
         "present": asdict(present_output),
         "persisted_seconddream": persisted_seconddream,

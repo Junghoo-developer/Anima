@@ -16,6 +16,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from ..prompt_builders import build_delivery_review_sys_prompt
 from .contracts import DELIVERY_REVIEW_REASON_TYPES, DeliveryReview
 from .packets import _compact_fact_cells_for_prompt
+from .structured_io import invoke_structured_with_repair, validate_delivery_review
 
 DELIVERY_REVIEW_SCHEMA = "DeliveryReview.v1"
 DELIVERY_REVIEW_VERDICTS = {"approve", "remand", "sos_119"}
@@ -183,6 +184,18 @@ def _review_to_dict(review_obj):
     return {}
 
 
+def _allowed_fact_ids_from_review_context(context: dict | None):
+    packet = context if isinstance(context, dict) else {}
+    facts = packet.get("fact_cells_for_review", [])
+    if not isinstance(facts, list):
+        return []
+    return [
+        str(item.get("fact_id") or "").strip()
+        for item in facts
+        if isinstance(item, dict) and str(item.get("fact_id") or "").strip()
+    ]
+
+
 def normalize_delivery_review(packet: dict | None):
     """Normalize the future post-phase3 -1b review packet.
 
@@ -312,12 +325,30 @@ def run_delivery_review_llm(llm, context: dict | None):
         return None
     packet = context if isinstance(context, dict) else {}
     prompt = build_delivery_review_prompt(packet)
-    structured_llm = llm.with_structured_output(DeliveryReview)
-    response = structured_llm.invoke([
-        SystemMessage(content=prompt),
-        HumanMessage(content=str(packet.get("final_answer") or "")),
-    ])
-    return normalize_delivery_review(_review_to_dict(response))
+    result = invoke_structured_with_repair(
+        llm=llm,
+        schema=DeliveryReview,
+        messages=[
+            SystemMessage(content=prompt),
+            HumanMessage(content=str(packet.get("final_answer") or "")),
+        ],
+        node_name="-1b_delivery_review",
+        repair_prompt="Return valid DeliveryReview.v1 JSON only. Do not invent fact_ids or tool calls.",
+        max_repairs=1,
+    )
+    if not result.ok:
+        failure_review = normalize_delivery_review({
+            "verdict": "remand",
+            "reason": "DeliveryReview structured output failed.",
+            "reason_type": "thought_gap",
+            "delta": result.failure.get("summary", ""),
+            "issues_found": ["structured_output_failure"],
+            "remand_target": "-1s",
+        })
+        failure_review["structured_failure"] = result.failure
+        return failure_review
+    review = normalize_delivery_review(result.value)
+    return validate_delivery_review(review, _allowed_fact_ids_from_review_context(packet))
 
 
 def _merge_review_with_speaker_guard(llm_review: dict | None, guard_review: dict | None):

@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from ..runtime.context_packet import build_cumulative_s_thinking_packet
 from .packets import compact_analysis_for_prompt
+from .structured_io import validate_thinking_handoff
 
 
 def _string_list(values: Any, *, limit: int = 6) -> list[str]:
@@ -155,10 +156,11 @@ def _build_s_thinking_packet(
     if start_gate_review:
         attempted.append("fast_gate_review")
     gaps: list[str] = []
+    status_notes: list[str] = []
     if bool(start_gate_contract.get("requires_grounding")):
-        gaps.append("stored or external evidence has not been read yet")
+        status_notes.append("stored or external evidence has not been read yet")
     if bool(start_gate_contract.get("needs_planning")):
-        gaps.append("a planner must choose the next action")
+        status_notes.append("a planner must choose the next action")
     if not gaps and not current_turn_facts:
         gaps.append("no explicit current-turn facts were extracted")
 
@@ -172,24 +174,27 @@ def _build_s_thinking_packet(
         key_facts_needed = ["direct evidence required by the start-gate contract"]
     analysis_facts = _analysis_known_facts(analysis_report, limit=8)
     what_we_know = _dedupe_keep_order(current_turn_facts + analysis_facts, limit=10)
-    gaps = _dedupe_keep_order(gaps + _analysis_missing_items(analysis_report, limit=6), limit=8)
+    gaps = _dedupe_keep_order(key_facts_needed + _analysis_missing_items(analysis_report, limit=6), limit=8)
     avoid = [
         "do not write tool names or queries in -1s",
         "do not copy raw user wording as the goal",
         "do not write final answer text in -1s",
         "do not bypass 2b fact judgment",
     ]
+    if bool(start_gate_contract.get("requires_grounding")):
+        avoid.append("stored/external evidence must be read before grounded delivery")
     handoff_target = _handoff_next_node(next_node)
     evidence_parts = [
         f"current_turn_facts={len(current_turn_facts)}",
         f"requires_grounding={bool(start_gate_contract.get('requires_grounding'))}",
         f"reasoning_budget={reasoning_plan.get('reasoning_budget', '')}",
     ]
+    evidence_parts.extend(status_notes)
     analysis_state = _analysis_evidence_state(analysis_report)
     if analysis_state:
         evidence_parts.append(f"analysis_report={analysis_state}")
 
-    return {
+    return validate_thinking_handoff({
         "schema": "ThinkingHandoff.v1",
         "producer": "-1s",
         "recipient": handoff_target,
@@ -205,7 +210,7 @@ def _build_s_thinking_packet(
         "next_node": handoff_target,
         "next_node_reason": str(route_reason or "").strip(),
         "constraints_for_next_node": _dedupe_keep_order(avoid, limit=6),
-    }
+    })
 
 
 def _history_cycle_from_state(state: dict[str, Any]) -> int:

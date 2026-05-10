@@ -8,11 +8,17 @@ classification or evidence judgment.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Callable
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from .packets import _compact_fact_cells_for_prompt
+from .structured_io import (
+    structured_failure_packet,
+    validate_operation_contract_payload,
+    validate_supervisor_tool_calls,
+)
 
 
 def _clip_text(value: Any, limit: int = 320) -> str:
@@ -57,6 +63,75 @@ def _s_thinking_missing_for_supervisor_prompt(state: dict[str, Any]) -> list[str
     return _clip_string_list(missing, limit=8, text_limit=180)
 
 
+def _extract_exact_date(value: Any) -> str:
+    text = str(value or "")
+    iso_match = re.search(r"\b(\d{4})-(\d{2})-(\d{2})\b", text)
+    if iso_match:
+        return "-".join(iso_match.groups())
+
+    spaced_match = re.search(r"\b(\d{4})\s+(\d{1,2})\s+(\d{1,2})\b", text)
+    if spaced_match:
+        year, month, day = spaced_match.groups()
+        return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
+
+    korean_match = re.search(r"(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일", text)
+    if korean_match:
+        year, month, day = korean_match.groups()
+        return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
+    return ""
+
+
+def _operation_contract_tool_message(
+    *,
+    user_input: str,
+    operation_contract: dict[str, Any],
+    build_supervisor_tool_message: Callable[[str, dict[str, Any], str, dict[str, Any] | None], AIMessage],
+) -> AIMessage | None:
+    if not isinstance(operation_contract, dict):
+        return None
+
+    operation_kind = str(operation_contract.get("operation_kind") or "").strip()
+    source_lane = str(operation_contract.get("source_lane") or "").strip()
+    if operation_kind not in {"search_new_source", "read_same_source_deeper", "review_personal_history"}:
+        return None
+
+    seed_parts = [
+        user_input,
+        operation_contract.get("target_scope", ""),
+        operation_contract.get("source_lane", ""),
+        operation_contract.get("search_subject", ""),
+        operation_contract.get("missing_slot", ""),
+        operation_contract.get("evidence_boundary", ""),
+        operation_contract.get("query_variant", ""),
+        *(
+            operation_contract.get("retrieval_key_candidates", [])
+            if isinstance(operation_contract.get("retrieval_key_candidates", []), list)
+            else []
+        ),
+        *(
+            operation_contract.get("source_title_candidates", [])
+            if isinstance(operation_contract.get("source_title_candidates", []), list)
+            else []
+        ),
+        *(
+            operation_contract.get("query_seed_candidates", [])
+            if isinstance(operation_contract.get("query_seed_candidates", []), list)
+            else []
+        ),
+    ]
+    search_blob = "\n".join(str(part or "") for part in seed_parts)
+    exact_date = _extract_exact_date(search_blob)
+    diary_requested = source_lane == "diary" or any(token in search_blob.lower() for token in ("diary", "일기"))
+    if exact_date and diary_requested:
+        return build_supervisor_tool_message(
+            "tool_read_full_diary",
+            {"target_date": exact_date},
+            user_input,
+            operation_contract,
+        )
+    return None
+
+
 def run_phase_0_supervisor(
     state: dict[str, Any],
     *,
@@ -73,6 +148,7 @@ def run_phase_0_supervisor(
     """Prepare tool execution from the current auditor instruction."""
     print_fn("[Phase 0] Executing auditor instruction...")
     llm_with_tools = llm_supervisor.bind_tools(available_tools)
+    available_tool_names = [str(getattr(tool, "name", "") or "").strip() for tool in available_tools]
     auditor_decision = state.get("auditor_decision", {})
     auditor_instruction = str(state.get("auditor_instruction", "") or "").strip()
     user_input = str(state.get("user_input", "") or "").strip()
@@ -136,14 +212,49 @@ def run_phase_0_supervisor(
             "messages": [direct_message],
         }
 
+    contract_message = _operation_contract_tool_message(
+        user_input=user_input,
+        operation_contract=planned_operation_contract,
+        build_supervisor_tool_message=build_supervisor_tool_message,
+    )
+    if contract_message is not None:
+        tool_name = str(contract_message.tool_calls[0].get("name") or "")
+        tool_args = contract_message.tool_calls[0].get("args", {})
+        if not isinstance(tool_args, dict):
+            tool_args = {}
+        print_fn(f"  [Phase 0] deterministic tool execution from operation_contract: {tool_name}")
+        return {
+            **base_result,
+            "execution_status": "tool_call_ready",
+            "execution_trace": execution_trace_after_supervisor(state, tool_name, tool_args),
+            "messages": [contract_message],
+        }
+
+    planned_operation_contract, contract_failure = validate_operation_contract_payload(planned_operation_contract)
+    if contract_failure:
+        print_fn(
+            "  [Phase 0] blocked invalid operation_contract payload: "
+            f"{contract_failure.get('summary', '')}"
+        )
+        return {
+            **base_result,
+            "execution_status": "blocked",
+            "execution_block_reason": "operation_contract_payload_invalid",
+            "structured_failure": {
+                **contract_failure,
+                "node": "0_supervisor",
+            },
+        }
+
     fact_cells = _fact_cells_for_supervisor_prompt(state)
     what_is_missing = _s_thinking_missing_for_supervisor_prompt(state)
 
     sys_prompt = (
         "You are ANIMA's 0_supervisor: the ops layer that converts the strategist's operation_contract into one exact safe tool call.\n"
         "Authority: choose a safe tool name, arguments, and search query from the operation contract and available tool cards.\n"
-        "Use operation_contract.source_lane, search_subject, missing_slot, query_seed_candidates, and evidence_boundary as the primary search axis.\n"
-        "query_seed_candidates are non-executable seeds: convert one into safe tool args only when a tool is actually useful.\n"
+        "Use operation_contract.source_lane, retrieval_key_candidates, source_title_candidates, query_seed_candidates, search_subject, missing_slot, and evidence_boundary as the primary search axis.\n"
+        "retrieval_key_candidates/source_title_candidates/query_seed_candidates are non-executable seeds: convert one compact seed into safe tool args only when a tool is actually useful.\n"
+        "Prefer retrieval_key_candidates and source_title_candidates over broad search_subject prose when building search args.\n"
         "If source_lane=capability_boundary, do not search just to answer access/capability; return no tool_calls unless the user explicitly asks to retrieve now.\n"
         "If the user explicitly gave two alternative search targets and the instruction names both targets, you may emit up to two tool_search_memory calls.\n"
         "If no tool would help, return no tool_calls so the graph can remand for review.\n"
@@ -166,6 +277,12 @@ def run_phase_0_supervisor(
         response = llm_with_tools.invoke(messages)
         tool_calls = getattr(response, "tool_calls", []) or []
         if tool_calls:
+            tool_calls, validation_failure = validate_supervisor_tool_calls(tool_calls, available_tool_names)
+            if validation_failure:
+                print_fn(f"  [Phase 0] invalid tool call; retrying ({attempt + 1}/3): {validation_failure.get('summary', '')}")
+                messages.append(response)
+                messages.append(HumanMessage(content="Return only valid available tool calls from ops_tool_cards, with dict args."))
+                continue
             if len(tool_calls) == 1:
                 tool_call = tool_calls[0]
                 response = build_supervisor_tool_message(
@@ -186,6 +303,13 @@ def run_phase_0_supervisor(
                 "messages": [response],
             }
 
+        content = str(getattr(response, "content", "") or "").strip()
+        if content:
+            print_fn(f"  [Phase 0] non-tool text returned; retrying ({attempt + 1}/3)")
+            messages.append(response)
+            messages.append(HumanMessage(content="Do not write answer text. Return a safe tool call or no content/no tool_calls."))
+            continue
+
         print_fn(f"  [Phase 0] tool-call parsing failed; retrying ({attempt + 1}/3)")
         if hasattr(response, "content"):
             messages.append(response)
@@ -196,6 +320,11 @@ def run_phase_0_supervisor(
         **base_result,
         "execution_status": "blocked",
         "execution_block_reason": "Supervisor could not convert the auditor instruction into one safe tool call.",
+        "structured_failure": structured_failure_packet(
+            node="0_supervisor",
+            reason_type="validation_error",
+            summary="Supervisor could not produce valid tool_calls after retries.",
+        ),
     }
 
 
