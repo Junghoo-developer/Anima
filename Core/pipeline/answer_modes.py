@@ -57,6 +57,16 @@ def answer_mode_policy_for_turn(
             "current_turn_grounding_ready": True,
         }
 
+    explicit_tool_grounding = bool(extract_explicit_search_keyword(text) or extract_artifact_hint(text))
+    if explicit_tool_grounding:
+        return {
+            "question_class": "grounded_recall_or_review",
+            "preferred_answer_mode": "grounded_answer",
+            "grounded_delivery_required": True,
+            "parametric_knowledge_allowed": False,
+            "current_turn_grounding_ready": False,
+        }
+
     teaching_markers = [
         " is ",
         " are ",
@@ -80,8 +90,6 @@ def answer_mode_policy_for_turn(
 
     explicit_grounding = bool(
         looks_like_memo_recall_turn(text)
-        or extract_explicit_search_keyword(text)
-        or extract_artifact_hint(text)
         or is_recent_dialogue_review_turn(text, recent_context)
         or is_assistant_investigation_request_turn(text)
     )

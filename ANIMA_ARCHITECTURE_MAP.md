@@ -1380,3 +1380,18 @@ Recent thin-controller cleanup:
     `AnalysisReport` shape without falling into answer-shaped report drift.
     This remains a structural contract hardening pass, not raw user-intent
     classification. Regression check: **338 OK**.
+87. **V4 Phase 1 #F4.8/#A1 — explicit execution contract + PDF artifact reads**
+    completed (2026-05-10). The -1s start-gate contract now distinguishes
+    capability questions ("can you search/read?") from explicit execution
+    commands ("search/read/find this now"). If the LLM start gate mislabels a
+    turn as `capability_boundary_question` while the existing explicit-search
+    or artifact-hint extractor has produced a concrete execution target, the
+    normalized contract is structurally corrected to `task_or_tool_request`
+    with grounding required and direct delivery disabled. The answer-mode
+    policy also checks explicit search/artifact requests before current-turn
+    teaching markers, preventing phrases such as "X라고 검색해봐" from being
+    swallowed as current-turn teaching. Separately, `tool_read_artifact` now
+    supports `.pdf` in artifact discovery and reading: it uses optional
+    `pypdf`/`PyPDF2` when available and a built-in simple text-stream fallback
+    for uncompressed literal-text PDFs when no PDF dependency is installed.
+    Regression check: **340 OK**.

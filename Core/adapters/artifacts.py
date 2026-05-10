@@ -9,7 +9,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ONEDRIVE_ROOT = PROJECT_ROOT.parent.parent
-ARTIFACT_EXTENSIONS = {".pptx", ".txt", ".md", ".json", ".py", ".docx"}
+ARTIFACT_EXTENSIONS = {".pptx", ".txt", ".md", ".json", ".py", ".docx", ".pdf"}
 
 
 def _normalize_artifact_key(text) -> str:
@@ -125,6 +125,84 @@ def _read_docx_artifact(path: str) -> str:
     return "\n".join(texts)
 
 
+def _decode_pdf_literal(value: bytes) -> str:
+    out = bytearray()
+    idx = 0
+    while idx < len(value):
+        byte = value[idx]
+        if byte == 92 and idx + 1 < len(value):
+            idx += 1
+            escaped = value[idx]
+            mapping = {
+                ord("n"): ord("\n"),
+                ord("r"): ord("\r"),
+                ord("t"): ord("\t"),
+                ord("b"): ord("\b"),
+                ord("f"): ord("\f"),
+                ord("("): ord("("),
+                ord(")"): ord(")"),
+                ord("\\"): ord("\\"),
+            }
+            out.append(mapping.get(escaped, escaped))
+        else:
+            out.append(byte)
+        idx += 1
+    return out.decode("utf-8", errors="ignore") or out.decode("latin-1", errors="ignore")
+
+
+def _extract_pdf_literals(stream: bytes) -> list[str]:
+    texts: list[str] = []
+    for match in re.finditer(rb"\((?:\\.|[^\\)]){1,4000}\)\s*(?:Tj|'|\"|TJ)", stream, re.DOTALL):
+        literal = match.group(0)
+        start = literal.find(b"(")
+        end = literal.rfind(b")")
+        if start >= 0 and end > start:
+            text = _decode_pdf_literal(literal[start + 1 : end]).strip()
+            if text:
+                texts.append(text)
+    for array_match in re.finditer(rb"\[(.*?)\]\s*TJ", stream, re.DOTALL):
+        for literal_match in re.finditer(rb"\((?:\\.|[^\\)]){1,4000}\)", array_match.group(1), re.DOTALL):
+            literal = literal_match.group(0)
+            text = _decode_pdf_literal(literal[1:-1]).strip()
+            if text:
+                texts.append(text)
+    return texts
+
+
+def _read_pdf_artifact(path: str) -> str:
+    try:
+        from pypdf import PdfReader  # type: ignore
+
+        reader = PdfReader(path)
+        pages = [(page.extract_text() or "").strip() for page in reader.pages[:30]]
+        text = "\n\n".join(page for page in pages if page)
+        if text.strip():
+            return text
+    except Exception:
+        pass
+
+    try:
+        from PyPDF2 import PdfReader  # type: ignore
+
+        reader = PdfReader(path)
+        pages = [(page.extract_text() or "").strip() for page in reader.pages[:30]]
+        text = "\n\n".join(page for page in pages if page)
+        if text.strip():
+            return text
+    except Exception:
+        pass
+
+    with open(path, "rb") as f:
+        data = f.read()
+    streams = re.findall(rb"stream\r?\n(.*?)\r?\nendstream", data, re.DOTALL)
+    texts: list[str] = []
+    for stream in streams:
+        texts.extend(_extract_pdf_literals(stream))
+    if not texts:
+        texts.extend(_extract_pdf_literals(data))
+    return "\n".join(texts)
+
+
 def read_artifact(
     artifact_hint,
     *,
@@ -148,6 +226,8 @@ def read_artifact(
             body = _read_pptx_artifact(path)
         elif ext == ".docx":
             body = _read_docx_artifact(path)
+        elif ext == ".pdf":
+            body = _read_pdf_artifact(path)
         else:
             return f"[artifact unsupported] {ext} is not supported yet for '{path}'.", [path]
     except Exception as exc:

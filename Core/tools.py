@@ -68,7 +68,7 @@ def tool_read_full_diary(target_date: str) -> str:
 @tool
 def tool_read_artifact(artifact_hint: str) -> str:
     """
-    Read a local artifact such as PPTX, TXT, MD, JSON, DOCX, or source material.
+    Read a local artifact such as PDF, PPTX, TXT, MD, JSON, DOCX, or source material.
     """
     res_text, _ = artifacts.read_artifact(artifact_hint)
     return res_text

@@ -2538,6 +2538,21 @@ def _normalize_start_gate_turn_contract(contract: dict | StartGateTurnContract |
     if answer_mode not in _START_GATE_ANSWER_MODES:
         answer_mode = "generic_dialogue"
 
+    explicit_search = _extract_explicit_search_keyword(user_input)
+    artifact_hint = _extract_artifact_hint(user_input)
+    if explicit_search and intent == "capability_boundary_question":
+        intent = "task_or_tool_request"
+        answer_mode = "generic_dialogue"
+        payload["requires_grounding"] = True
+        payload["direct_delivery_allowed"] = False
+        payload["needs_planning"] = True
+    if artifact_hint and intent == "capability_boundary_question":
+        intent = "task_or_tool_request"
+        answer_mode = "generic_dialogue"
+        payload["requires_grounding"] = True
+        payload["direct_delivery_allowed"] = False
+        payload["needs_planning"] = True
+
     if intent == "providing_current_memory":
         answer_mode = "current_turn_grounding"
     elif intent == "requesting_memory_recall":
@@ -2681,16 +2696,17 @@ def _llm_start_gate_turn_contract(
         "   This includes correction/teaching turns where the user says to remember a fact they are providing now.\n"
         "   Example: 'remember this: my name is X and your name is Y' is current-turn grounding, not stored-memory retrieval.\n"
         "4. If the user asks whether you can access/search/use/read/see a source, memory, diary, or database, choose capability_boundary_question and generic_dialogue. Korean examples: '내 일기를 볼 수 있어?', 'DB 검색 가능해?', '기억에 접근할 수 있어?' This asks about capability, not retrieval.\n"
-        "5. If the user asks to remember, retrieve, verify, search, or report a concrete past stored fact that is NOT supplied in the current turn, choose requesting_memory_recall and grounded_recall. Example: '내 일기에서 X를 찾아봐.'\n"
-        "6. If the user asks about public media or general knowledge, choose public_knowledge_question and public_parametric_knowledge.\n"
-        "7. normalized_goal must be abstract; do not choose tools, write search queries, or write final answer text.\n"
-        "8. If tactical_briefing contains active DreamHint advisories, treat them as advisory context only: do not let them override the current turn, propose tool calls, or copy briefing text into the contract goal.\n"
-        "9. (V4 §1-A.0 / §2 (k)) Do not perform goal-setting. -1s normalizes user intent only; the operational goal is owned by -1a's strategist_goal.user_goal_core.\n"
+        "5. If the user commands execution now (search/read/find/look up/check a concrete phrase or source), choose task_or_tool_request or requesting_memory_recall, not capability_boundary_question. Korean examples: 'X라고 검색해봐', 'X를 찾아봐', '이 파일 읽어봐'.\n"
+        "6. If the user asks to remember, retrieve, verify, search, or report a concrete past stored fact that is NOT supplied in the current turn, choose requesting_memory_recall and grounded_recall. Example: '내 일기에서 X를 찾아봐.'\n"
+        "7. If the user asks about public media or general knowledge, choose public_knowledge_question and public_parametric_knowledge.\n"
+        "8. normalized_goal must be abstract; do not choose tools, write search queries, or write final answer text.\n"
+        "9. If tactical_briefing contains active DreamHint advisories, treat them as advisory context only: do not let them override the current turn, propose tool calls, or copy briefing text into the contract goal.\n"
+        "10. (V4 §1-A.0 / §2 (k)) Do not perform goal-setting. -1s normalizes user intent only; the operational goal is owned by -1a's strategist_goal.user_goal_core.\n"
     )
     recursion_rule = ""
     if has_prior_critique:
         recursion_rule = (
-            "10. RECURSION MODE — prior_thought_critique is present. Run TWO steps in order:\n"
+            "11. RECURSION MODE — prior_thought_critique is present. Run TWO steps in order:\n"
             "    Step 1 (verification, MUST run first):\n"
             "      Re-read working_memory + recent_context + s_thinking_history with the critique in mind.\n"
             "      Ask: 'Given this critique, is the evidence really thin, or did the previous step miss something?'\n"
@@ -3649,10 +3665,10 @@ def _extract_artifact_hint(text: str):
     raw = str(text or "").strip()
     if not raw:
         return ""
-    path_match = re.search(r'([A-Za-z]:\\[^"\']+\.(?:pptx|txt|md|json|py|docx))', raw, re.IGNORECASE)
+    path_match = re.search(r'([A-Za-z]:\\[^"\']+\.(?:pptx|txt|md|json|py|docx|pdf))', raw, re.IGNORECASE)
     if path_match:
         return path_match.group(1).strip()
-    file_match = re.search(r'([^\n\r"\']+\.(?:pptx|txt|md|json|py|docx))', raw, re.IGNORECASE)
+    file_match = re.search(r'([^\n\r"\']+\.(?:pptx|txt|md|json|py|docx|pdf))', raw, re.IGNORECASE)
     if file_match:
         return file_match.group(1).strip()
     lowered = raw.lower()
@@ -3670,7 +3686,7 @@ def _is_artifact_review_turn(user_input: str):
         return False
     lowered = text.lower()
     review_markers = ["read", "review", "check", "inspect", "analyze", "\uc77d\uc5b4", "\uac80\ud1a0", "\ubd84\uc11d"]
-    return any(marker in lowered for marker in review_markers) or any(ext in lowered for ext in [".pptx", ".txt", ".md", ".docx", ".json", ".py"])
+    return any(marker in lowered for marker in review_markers) or any(ext in lowered for ext in [".pptx", ".txt", ".md", ".docx", ".json", ".py", ".pdf"])
 
 
 
@@ -6671,7 +6687,7 @@ def _ops_tool_cards():
         {
             "tool_name": "tool_read_artifact",
             "purpose": "Read a local document or artifact directly.",
-            "use_when": "Use when artifact_hint or document/PPTX/source reading is required.",
+            "use_when": "Use when artifact_hint or document/PDF/PPTX/source reading is required.",
             "avoid_when": "Avoid for lightweight conversation or direct-answer turns.",
         },
         {

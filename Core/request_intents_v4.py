@@ -241,7 +241,7 @@ def extract_explicit_search_phrase(user_input: str) -> str:
     if not candidate:
         return ""
 
-    candidate = re.sub(r"^\s*(?:다시|저기|그|그거|그것|좀)\s+", "", candidate, flags=re.IGNORECASE).strip()
+    candidate = re.sub(r"^\s*(?:다시|저기|그럼|그러면|그|그거|그것|좀)\s+", "", candidate, flags=re.IGNORECASE).strip()
     candidate = re.sub(r"^\s*(?:search|검색)\s+", "", candidate, flags=re.IGNORECASE).strip()
     candidate = re.split(r"\s*(?:그리고|그럼|결과|결과가|아니면|or)\s+", candidate, maxsplit=1, flags=re.IGNORECASE)[0].strip()
     candidate = re.sub(
