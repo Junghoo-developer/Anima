@@ -1,7 +1,7 @@
 # 발주 #SO1 — Structured Output 전면 강화 / 구조화 실패 방어선
 
 **작성일**: 2026-05-09  
-**상태**: 정식 발주안 / 코딩 Codex 실행 대기.  
+**상태**: 결재 도장 박힘 (2026-05-10) / Codex 실행 완료, ARCH MAP #81 등록됨.  
 **트랙**: V4 Phase 1 / SO 트랙 #SO1 (Structured Output 1차)  
 **선행**: V4 §1-A LIVE + V4 §2 LIVE, CR1/CR1.1 현장 루프 보정 직후.  
 **목표**: 현장 구조화 에러가 라우팅/워룸/결재 루프 전체를 오염시키지 않도록, LLM 출력 계약을 노드별로 강화하고 실패를 typed failure packet으로 흡수한다.

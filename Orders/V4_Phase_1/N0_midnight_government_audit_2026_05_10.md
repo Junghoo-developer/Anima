@@ -1,7 +1,7 @@
 # N0 — Midnight Government Runtime Audit
 
 작성일: 2026-05-10
-상태: 감사 리포트 / 코드 변경 전 진단
+상태: 감사 리포트 / N1·N2 후속 처리 완료 (2026-05-10), ARCH MAP #84 등록됨.
 대상: `Core.midnight` dry-run 실행 결과와 V4 헌법/ARCH MAP/실제 코드 대조
 
 ## 실행 관찰

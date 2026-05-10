@@ -1,7 +1,7 @@
 # SO1 structured-output inventory
 
 Date: 2026-05-09
-Status: SO1-A inventory, generated during implementation.
+Status: SO1-A inventory, generated during implementation. 결재 도장 박힘 (2026-05-10) — ARCH MAP #81 등록됨.
 
 ## Live structured-output call sites
 
