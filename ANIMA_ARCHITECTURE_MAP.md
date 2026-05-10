@@ -1336,7 +1336,11 @@ Recent thin-controller cleanup:
     `tool_read_full_diary` path. Neo4j memory search now checks optional chunk
     schema metadata and skips the `HAS_CHUNK` vector query when the live DB lacks
     chunk relationships/properties, falling back to raw PastRecord vector and
-    lexical search without schema-warning spam. New regression coverage:
+    lexical search without schema-warning spam. The `OperationContract` schema
+    also gained `retrieval_key_candidates` and `source_title_candidates` (both
+    bounded to 5 entries via `normalize_operation_contract`) so phase 0 can
+    prefer compact named-entity / document-title keys over narrative
+    `search_subject` strings when binding tool arguments. New regression coverage:
     `tests/test_operation_contract_payload_hardening.py` plus Neo4j Record-shape
     schema probing coverage. Full tests: **333 OK**.
 84. **V4 Phase 1 #N0 — midnight-government runtime audit** recorded
